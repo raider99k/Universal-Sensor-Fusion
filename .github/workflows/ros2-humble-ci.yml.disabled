@@ -1,0 +1,60 @@
+name: ros2-humble-ci
+
+# Disabled by default to avoid GitHub Actions usage/cost.
+# To re-enable, rename this file to:
+#   .github/workflows/ros2-humble-ci.yml
+
+on:
+  push:
+    paths:
+      - "Fusion/ros2_ws/**"
+      - ".github/workflows/ros2-humble-ci.yml"
+  pull_request:
+    paths:
+      - "Fusion/ros2_ws/**"
+      - ".github/workflows/ros2-humble-ci.yml"
+
+jobs:
+  build-test-gate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup ROS 2 Humble
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: humble
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-colcon-common-extensions \
+            python3-rosdep \
+            python3-pip \
+            python3-pytest
+
+      - name: Init rosdep
+        run: |
+          sudo rosdep init || true
+          rosdep update
+
+      - name: Install ROS package deps
+        run: |
+          cd Fusion/ros2_ws
+          rosdep install --from-paths src --ignore-src -r -y
+
+      - name: Run CI gates
+        run: |
+          cd Fusion/ros2_ws
+          bash ci/run_ci_gates.sh
+
+      - name: Upload regression reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-suite-reports
+          path: Fusion/ros2_ws/reports

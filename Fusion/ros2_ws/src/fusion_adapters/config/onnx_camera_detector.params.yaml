@@ -1,0 +1,12 @@
+onnx_camera_detector:
+  ros__parameters:
+    # Empty = bundled fusion_adapters/models/nano.onnx (YOLO26n, 4 FS cone classes, 768x480 input).
+    # Point this at your own Ultralytics-exported end2end ONNX to swap the network.
+    model_path: ""
+    image_topic: /zed2/zed_node/left/image_rect_color/compressed
+    compressed: true
+    output_topic: /camera/cone_detections
+    conf_threshold: 0.30
+    auto_rotate: false
+    intra_op_threads: 0
+    image_quality: 1.0

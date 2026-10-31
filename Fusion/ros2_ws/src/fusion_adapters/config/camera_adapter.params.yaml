@@ -1,0 +1,9 @@
+camera_detection_adapter:
+  ros__parameters:
+    input_topic: /vision/cone_detections
+    output_topic: /camera/cone_detections
+    quality_topic: /camera/image_quality
+    default_image_quality: 1.0
+    class_map: blue:0,yellow:1,orange:2,unknown:3
+    max_detections: 256
+    min_confidence: 0.05

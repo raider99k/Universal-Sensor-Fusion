@@ -1,0 +1,12 @@
+std_msgs/Header header
+uint8 TRACK_TENTATIVE=0
+uint8 TRACK_CONFIRMED=1
+uint8 TRACK_LOST=2
+uint32 track_id
+geometry_msgs/Point position
+geometry_msgs/Vector3 velocity
+float64[9] covariance
+float32[4] class_probs
+float32 track_age
+uint8 track_status
+float32 quality_score

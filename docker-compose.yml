@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  fusion_stack:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sensor_fusion_synthetic_stack
+    ports:
+      - "8765:8765"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - ROS_DOMAIN_ID=0
+    volumes:
+      - ./config:/workspace/config:ro
+    command: ros2 launch fusion_core synthetic_stack.launch.py
+    restart: unless-stopped

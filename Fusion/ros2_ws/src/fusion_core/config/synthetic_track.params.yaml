@@ -1,0 +1,30 @@
+synthetic_track_publisher:
+  ros__parameters:
+    camera_topic: /vision/cone_detections
+    lidar_topic: /ouster/points
+    motion_topic: /ego/odometry
+    ground_truth_topic: /ground_truth/cones
+    target_frame: base_link
+    world_frame: odom
+    straight_length_m: 40.0
+    turn_radius_m: 15.0
+    track_width_m: 3.5
+    cone_spacing_m: 2.5
+    vehicle_speed_mps: 8.0
+    camera_publish_rate_hz: 20.0
+    lidar_publish_rate_hz: 20.0
+    motion_publish_rate_hz: 100.0
+    ground_truth_publish_rate_hz: 2.0
+    camera_fx: 700.0
+    camera_fy: 700.0
+    camera_cx: 640.0
+    camera_cy: 360.0
+    image_width: 1280
+    image_height: 720
+    camera_dropout_prob: 0.02
+    lidar_dropout_prob: 0.02
+    camera_oosm_prob: 0.05
+    lidar_oosm_prob: 0.08
+    max_oosm_delay_ms: 90.0
+    timestamp_jitter_std_ms: 3.0
+    random_seed: 42
