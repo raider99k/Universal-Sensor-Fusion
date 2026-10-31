@@ -1,0 +1,9 @@
+synthetic_motion_publisher:
+  ros__parameters:
+    output_topic: /ego/odometry
+    frame_id: odom
+    child_frame_id: base_link
+    publish_rate_hz: 100.0
+    speed_mps: 8.0
+    yaw_rate_rps: 0.08
+    radius_m: 40.0

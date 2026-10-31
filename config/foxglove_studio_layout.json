@@ -1,0 +1,130 @@
+{
+  "configVersion": 2,
+  "globalVariables": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "first": {
+      "first": "3D!2w8z0h8",
+      "second": {
+        "first": "Plot!3132q9f",
+        "second": "DiagnosticStatus!2v0h8y4",
+        "direction": "row"
+      },
+      "direction": "column",
+      "splitPercentage": 68
+    },
+    "second": {
+      "first": "RawMessages!1r8o0s3",
+      "second": "StateTransitions!2u1x4z9",
+      "direction": "column",
+      "splitPercentage": 50
+    },
+    "direction": "row",
+    "splitPercentage": 75
+  },
+  "linkedGlobalVariables": [],
+  "userNodes": {},
+  "playback": {
+    "loop": true
+  },
+  "panels": {
+    "3D!2w8z0h8": {
+      "cameraState": {
+        "perspective": true,
+        "distance": 32.0,
+        "phi": 58.0,
+        "thetaOffset": -45.0,
+        "targetOffset": [0.0, 0.0, 0.0],
+        "target": [0.0, 0.0, 0.0],
+        "targetOrientation": [0.0, 0.0, 0.0, 1.0],
+        "fovy": 45.0,
+        "near": 0.5,
+        "far": 5000.0
+      },
+      "followMode": "follow-pose",
+      "followTf": "base_link",
+      "scene": {
+        "enableStats": true,
+        "transforms": {
+          "showLabel": true,
+          "axisScale": 1.5,
+          "lineWidth": 2.0
+        }
+      },
+      "transforms": {
+        "frame:odom": {
+          "visible": true
+        },
+        "frame:base_link": {
+          "visible": true
+        }
+      },
+      "topics": {
+        "/ground_truth/cones": {
+          "visible": true
+        },
+        "/perception/cone_track_markers": {
+          "visible": true
+        },
+        "/perception/cone_observation_markers": {
+          "visible": true
+        },
+        "/ouster/points": {
+          "visible": true,
+          "colorField": "intensity",
+          "colorMode": "colormap",
+          "colorMap": "turbo",
+          "pointSize": 4.0
+        },
+        "/ego/odometry": {
+          "visible": true
+        }
+      },
+      "layers": {},
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point"
+      },
+      "imageMode": {}
+    },
+    "Plot!3132q9f": {
+      "title": "Perception Telemetry & Latency",
+      "paths": [
+        {
+          "value": "/perception/diagnostics.status[0].values[0].value",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "Pipeline Latency (ms)"
+        },
+        {
+          "value": "/perception/diagnostics.status[0].values[1].value",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "Active Tracks"
+        }
+      ],
+      "showLegend": true,
+      "xAxisVal": "timestamp"
+    },
+    "DiagnosticStatus!2v0h8y4": {
+      "title": "Fusion Diagnostics & Health",
+      "topic": "/perception/diagnostics",
+      "collapsedSections": []
+    },
+    "RawMessages!1r8o0s3": {
+      "title": "Fused Cone Tracks Stream",
+      "topicPath": "/perception/cone_tracks",
+      "diffTopicPath": "",
+      "diffMethod": "custom",
+      "diffEnabled": false,
+      "showFullMessageForDiff": false
+    },
+    "StateTransitions!2u1x4z9": {
+      "title": "Camera Cone Detections Stream",
+      "topicPath": "/vision/cone_detections"
+    }
+  }
+}

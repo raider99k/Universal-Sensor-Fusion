@@ -1,0 +1,20 @@
+lidar_cluster_adapter:
+  ros__parameters:
+    output_topic: "/lidar/cone_clusters"
+    pose_array_topic: ""
+    marker_array_topic: ""
+    detection3d_topic: ""
+    generic_input_topic: "/lidar/cone_clusters_in"
+    input_type: "pose_array"  # 'pose_array', 'marker_array', 'detection3d'
+
+    default_point_count: 10
+    default_geometry_quality: 1.0
+    enable_surface_axis_offset: false
+    surface_offset_m: 0.08
+    base_variance_xy: 0.04
+    variance_range_coeff: 0.003
+    base_variance_z: 0.10
+    min_range_m: 0.3
+    max_range_m: 60.0
+
+    class_map: "blue:0,blue_cone:0,yellow:1,yellow_cone:1,orange:2,small_orange:2,big_orange:3,large_orange:3"

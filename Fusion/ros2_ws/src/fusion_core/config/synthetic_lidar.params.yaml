@@ -1,0 +1,17 @@
+synthetic_lidar_publisher:
+  ros__parameters:
+    output_topic: /lidar/cone_clusters
+    frame_id: base_link
+    publish_rate_hz: 20.0
+    cone_count: 8
+    range_min_m: 4.0
+    range_max_m: 30.0
+    dropout_probability: 0.02
+    oosm_probability: 0.08
+    max_oosm_delay_ms: 160.0
+    timestamp_jitter_std_ms: 5.0
+    centroid_noise_xy_m: 0.06
+    centroid_noise_z_m: 0.03
+    lidar_quality_base: 0.93
+    lidar_quality_noise: 0.04
+    random_seed: 17

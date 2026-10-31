@@ -1,0 +1,34 @@
+.venv/
+**/__pycache__/
+*.pyc
+
+# ROS 2 build artifacts
+Fusion/ros2_ws/build/
+Fusion/ros2_ws/install/
+Fusion/ros2_ws/log/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+
+# Local planning/docs kept out of git
+AGENT.md
+required_info.md
+unified_sensor_fusion_technical_specification.md
+.agents/
+ORIGINAL_REQUEST.md
+
+# Native C++ build temp
+**/build_temp/
+*.obj
+*.exp
+
+# Root model duplicate (bundled inside fusion_adapters/models/)
+/nano.onnx
+
+# Large dataset & rosbag files
+*.bag
+*.mcap
+*.tar.gz
+*.csv
+scratch/

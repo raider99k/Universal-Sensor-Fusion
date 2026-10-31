@@ -1,0 +1,17 @@
+synthetic_camera_publisher:
+  ros__parameters:
+    output_topic: /camera/cone_detections
+    frame_id: zedx_left_camera_optical_frame
+    publish_rate_hz: 20.0
+    cone_count: 8
+    image_width: 1280
+    image_height: 720
+    dropout_probability: 0.02
+    oosm_probability: 0.05
+    max_oosm_delay_ms: 120.0
+    timestamp_jitter_std_ms: 4.0
+    confidence_mean: 0.85
+    confidence_std: 0.12
+    image_quality_base: 0.95
+    image_quality_noise: 0.03
+    random_seed: 7
