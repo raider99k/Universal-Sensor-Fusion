@@ -55,6 +55,55 @@ Runs entirely on CPU (Linux, WSL2, Docker) without requiring discrete GPU or CUD
 
 ---
 
+## Benchmarks
+
+Evaluated on real Formula Student Driverless rosbags (Mainfranken Racing 2026, AMZ Driverless 2017) against surveyed RTK-GPS ground truth and on-car/constant-velocity baselines, plus a deterministic synthetic autocross stream. All timings are CPU-only (no GPU/CUDA).
+
+### Real Vehicle Datasets (Mainfranken Racing 2026 — Track 1 vs. Surveyed RTK-GPS)
+
+Sensors: Ouster OS1-64 (64-beam LiDAR), ZED2 stereo camera, SBG IMU/velocity.
+
+| Pipeline Configuration | Position RMSE | Overall Recall | Recall (12–21 m) | False Positive Rate | Semantic Accuracy |
+|---|---|---|---|---|---|
+| On-car stereo baseline (standalone) | 10.48 cm (`0.1048 m`) | 96.92% | 96.40% | 57.11% | 50.87% |
+| Baseline early fusion | — | — | — | — | 88.02% |
+| **This stack (`fusion_core` + `nano.onnx` YOLO26n + OS1-64)** | **4.85 cm** (`0.0485 m`) | **97.69%** | **96.68%** | **5.47%** | **86.84%** |
+| **This stack (`fusion_core` + OS1-64, 66 scans)** | **4.91 cm** (`0.0491 m`) | **99.23%** | **98.61%** | **0.72%** | **98.54%** |
+
+*(195 ZED2 frames evaluated for the end-to-end `nano.onnx` run; 66 64-beam scans evaluated for the OS1-64 + RTK-GPS ground-truth run.)*
+
+### Tracking & Cornering Stability (vs. Constant-Velocity EKF Baseline)
+
+| Dataset | Metric | Constant-Velocity Baseline | This Stack ($SE(2)$ EKF) |
+|---|---|---|---|
+| **Mainfranken 2026 FSCZ** (10 laps, 500 frames) | Track innovation RMSE | `1.3853 m` | **`0.1391 m`** |
+| Mainfranken 2026 FSCZ (10 laps, 500 frames) | High-G cornering RMSE | `1.4812 m` | **`0.1401 m`** |
+| Mainfranken 2026 FSCZ (10 laps, 500 frames) | Semantic flips (1,261 landmarks) | `117` | **`10`** |
+| **AMZ 2017 Zurich Airfield** (VLP-16, 50 active frames) | Track innovation RMSE | `1.1292 m` | **`0.0243 m`** |
+| AMZ 2017 Zurich Airfield (VLP-16, 50 active frames) | High-G cornering RMSE | `1.0878 m` | **`0.0347 m`** |
+| AMZ 2017 Zurich Airfield (VLP-16, 50 active frames) | Long-range cone hits (12–28 m) | `0` | **`86`** |
+
+### Synthetic Autocross Stream (80 Frames, Hairpin + Chicane, Seed 42)
+
+| Metric | Legacy Baseline | This Stack ($SE(2)$ Fusion) |
+|---|---|---|
+| Position RMSE | `0.3509 m` | **`0.1188 m`** |
+| Overall Recall | `48.99%` | **`96.84%`** |
+| Long-Range Recall (15–35 m) | `0.00%` | **`93.06%`** |
+| Semantic Accuracy | `79.97%` | **`99.58%`** |
+| Track ID Switches | `313` | **`0`** |
+
+### CPU Step Latency
+
+| Workload | Prior Unvectorized | Python / NumPy / ORT | C++20 `fusion_fast_kernels` |
+|---|---|---|---|
+| **Ouster OS1-64** (131,072 pts/scan + EKF) | `21.79 ms` | `8.76 ms` (NumPy) | **`5.70 ms`** |
+| **Velodyne VLP-16** (16-beam + EKF) | `15.72 ms` | **`6.24 ms`** (NumPy) | — |
+| **Synthetic Autocross** (80 frames) | — | `8.91 ms` mean, `19.42 ms` P99 (NumPy) | — |
+| **Bundled `nano.onnx` (YOLO26n)** camera inference | — | `49.99 ms` mean (ONNX Runtime CPU) | — |
+
+---
+
 ## Quickstart
 
 ### Docker Environment
@@ -62,8 +111,8 @@ Runs entirely on CPU (Linux, WSL2, Docker) without requiring discrete GPU or CUD
 Launch the stack with synthetic track simulation, EKF tracking, and Foxglove WebSocket bridge:
 
 ```bash
-git clone https://github.com/raider99k/Sensor-Fusion.git
-cd "Sensor Fusion"
+git clone https://github.com/raider99k/Universal-Sensor-Fusion.git
+cd Universal-Sensor-Fusion
 docker compose up
 ```
 
@@ -109,20 +158,17 @@ colcon build --packages-select fusion_interfaces fusion_core fusion_adapters
 source install/setup.bash
 ```
 
-### 2. Run Test Suite
+### 2. Verify Pipeline Launches
 ```bash
-cd Fusion/ros2_ws
-pytest -q
-```
+# Synthetic test track simulation (zero hardware needed)
+ros2 launch fusion_core synthetic_stack.launch.py
 
-### 3. Run Pipeline Launches
-```bash
-# Core fusion node
+# Core fusion node standalone
 ros2 launch fusion_core fusion.launch.py
 
 # Full stack with camera and LiDAR adapters
 ros2 launch fusion_adapters full_stack.launch.py
 
-# Stack with deep-learning ONNX camera detector
+# Full stack with pre-bundled ONNX camera detector
 ros2 launch fusion_adapters onnx_camera_stack.launch.py
 ```
