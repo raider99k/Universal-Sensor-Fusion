@@ -6,7 +6,7 @@ import struct
 from typing import List, Optional, Tuple
 
 try:
-    from geometry_msgs.msg import Point, Pose, Pose2D, Quaternion, TransformStamped, Twist, Vector3
+    from geometry_msgs.msg import Point, Pose, Quaternion, TransformStamped, Twist, Vector3
     from nav_msgs.msg import Odometry
     import rclpy
     from rclpy.node import Node
@@ -20,7 +20,6 @@ except ImportError:
     class Node:  # type: ignore
         pass
     class Point: pass
-    class Pose2D: pass
     class Quaternion: pass
     class TransformStamped: pass
     class Odometry: pass
@@ -394,11 +393,14 @@ class SyntheticTrackPublisher(Node):
             detection = Detection2D()
             detection.header = header
 
-            # Setup BoundingBox2D
+            # Setup BoundingBox2D (supports both vision_msgs Pose2D.position and geometry_msgs Pose2D)
             bbox = BoundingBox2D()
-            bbox.center = Pose2D()
-            bbox.center.x = float(u)
-            bbox.center.y = float(v)
+            if hasattr(bbox.center, "position"):
+                bbox.center.position.x = float(u)
+                bbox.center.position.y = float(v)
+            else:
+                bbox.center.x = float(u)
+                bbox.center.y = float(v)
             bbox.center.theta = 0.0
             bbox.size_x = float(bbox_w)
             bbox.size_y = float(bbox_h)

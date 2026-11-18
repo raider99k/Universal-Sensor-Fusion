@@ -6,6 +6,7 @@ ouster_lidar_adapter:
     diag_topic: /perception/adapter_diagnostics
     diag_rate_hz: 20.0
     enable_motion_deskew: false
+    enable_packet_accumulation: false
     motion_topic: /ego/odometry
     motion_buffer_size: 128
     deskew_scan_duration_s: 0.1

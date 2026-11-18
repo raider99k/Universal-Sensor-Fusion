@@ -3,7 +3,7 @@
 <package format="3">
   <name>fusion_core_cpp</name>
   <version>0.3.0</version>
-  <description>C++20 / Eigen3 accelerated kernels and zero-copy rclcpp composable nodes for Universal Sensor Fusion.</description>
+  <description>C++20 accelerated kernels and zero-copy rclcpp composable nodes for Universal Sensor Fusion.</description>
   <maintainer email="perception@fsd-universal.org">Universal Sensor Fusion Team</maintainer>
   <license>Apache-2.0</license>
 
@@ -14,6 +14,7 @@
   <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>diagnostic_msgs</depend>
   <depend>fusion_interfaces</depend>
 
   <export>

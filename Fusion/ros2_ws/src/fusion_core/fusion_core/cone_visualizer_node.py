@@ -11,31 +11,64 @@ try:
     from rclpy.node import Node
     from visualization_msgs.msg import Marker, MarkerArray
 except ImportError:
+    from types import SimpleNamespace
+
     class Node:  # type: ignore
         pass
-    class Duration: pass
-    class ConeTrack:
+
+    class Duration:  # type: ignore
+        def __init__(self) -> None:
+            self.sec = 0
+            self.nanosec = 0
+
+    class ConeTrack:  # type: ignore
         TRACK_TENTATIVE = 0
         TRACK_CONFIRMED = 1
         TRACK_LOST = 2
-    class ConeObservation: pass
-    class Point: pass
-    class Vector3: pass
-    class Marker:
+
+    class ConeObservation:  # type: ignore
+        pass
+
+    class Point:  # type: ignore
+        pass
+
+    class Vector3:  # type: ignore
+        pass
+
+    class Marker:  # type: ignore
         CYLINDER = 3
         TEXT_VIEW_FACING = 9
         SPHERE = 2
         ADD = 0
         DELETE = 2
-    class MarkerArray: pass
 
-CLASS_LABELS = ["blue", "yellow", "orange", "unknown"]
+        def __init__(self) -> None:
+            self.header = SimpleNamespace(frame_id="", stamp=None)
+            self.ns = ""
+            self.id = 0
+            self.type = 0
+            self.action = 0
+            self.pose = SimpleNamespace(
+                position=SimpleNamespace(x=0.0, y=0.0, z=0.0),
+                orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+            )
+            self.scale = SimpleNamespace(x=0.0, y=0.0, z=0.0)
+            self.color = SimpleNamespace(r=0.0, g=0.0, b=0.0, a=0.0)
+            self.text = ""
+            self.lifetime = Duration()
+
+    class MarkerArray:  # type: ignore
+        def __init__(self) -> None:
+            self.markers: List[Marker] = []
+
+CLASS_LABELS = ["blue", "yellow", "orange", "big_orange"]
 CLASS_COLORS = {
     0: (0.0, 0.35, 1.0),    # Blue
     1: (1.0, 0.90, 0.0),    # Yellow
     2: (1.0, 0.40, 0.0),    # Orange
-    3: (0.7, 0.70, 0.7),    # Unknown / Grey
+    3: (1.0, 0.22, 0.05),   # Big Orange
 }
+UNKNOWN_COLOR = (0.7, 0.70, 0.7)
 
 
 class ConeVisualizerNode(Node):
@@ -86,16 +119,20 @@ class ConeVisualizerNode(Node):
         )
 
     def _dominant_class(self, class_probs: List[float]) -> int:
-        if not class_probs:
-            return 3
+        if class_probs is None or len(class_probs) == 0:
+            return -1
         best_idx = 0
-        best_val = class_probs[0]
+        best_val = float(class_probs[0])
+        min_val = best_val
         for i in range(1, len(class_probs)):
-            if class_probs[i] > best_val:
-                best_val = class_probs[i]
+            val = float(class_probs[i])
+            if val > best_val:
+                best_val = val
                 best_idx = i
-        if best_val < 0.35:
-            return 3
+            if val < min_val:
+                min_val = val
+        if (best_val - min_val) < 1e-3 or best_val < 0.35:
+            return -1
         return best_idx
 
     def _on_cone_track(self, msg: ConeTrack) -> None:
@@ -119,9 +156,16 @@ class ConeVisualizerNode(Node):
             return
 
         dominant_idx = self._dominant_class(msg.class_probs)
-        rgb = CLASS_COLORS.get(dominant_idx, (0.7, 0.7, 0.7))
+        rgb = CLASS_COLORS.get(dominant_idx, UNKNOWN_COLOR)
         alpha = 0.95 if msg.track_status == ConeTrack.TRACK_CONFIRMED else 0.60
-        dominant_label = CLASS_LABELS[dominant_idx] if dominant_idx < len(CLASS_LABELS) else "unknown"
+        dominant_label = (
+            CLASS_LABELS[dominant_idx]
+            if 0 <= dominant_idx < len(CLASS_LABELS)
+            else "unknown"
+        )
+        is_big = dominant_idx == 3
+        cone_diam = 0.285 if is_big else 0.228
+        cone_height = 0.505 if is_big else 0.325
 
         lifetime = Duration()
         lifetime.sec = int(self.track_lifetime_s)
@@ -137,11 +181,11 @@ class ConeVisualizerNode(Node):
         cone_m.action = Marker.ADD
         cone_m.pose.position.x = msg.position.x
         cone_m.pose.position.y = msg.position.y
-        cone_m.pose.position.z = msg.position.z + 0.16
+        cone_m.pose.position.z = msg.position.z + 0.5 * cone_height
         cone_m.pose.orientation.w = 1.0
-        cone_m.scale.x = 0.25
-        cone_m.scale.y = 0.25
-        cone_m.scale.z = 0.32
+        cone_m.scale.x = cone_diam
+        cone_m.scale.y = cone_diam
+        cone_m.scale.z = cone_height
         cone_m.color.r = rgb[0]
         cone_m.color.g = rgb[1]
         cone_m.color.b = rgb[2]
@@ -207,7 +251,7 @@ class ConeVisualizerNode(Node):
         self.obs_counter = (self.obs_counter + 1) % 500
 
         dominant_idx = self._dominant_class(msg.class_probs)
-        rgb = CLASS_COLORS.get(dominant_idx, (0.7, 0.7, 0.7))
+        rgb = CLASS_COLORS.get(dominant_idx, UNKNOWN_COLOR)
 
         lifetime = Duration()
         lifetime.sec = int(self.obs_lifetime_s)

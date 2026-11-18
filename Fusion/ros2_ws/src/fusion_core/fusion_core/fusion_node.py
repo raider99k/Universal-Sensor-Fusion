@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Deque, List, Optional, Tuple
-
 from collections import deque
+import json
 import math
 import time
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 try:
     from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
@@ -13,16 +13,20 @@ try:
         CameraConeDetections,
         ConeObservation,
         ConeTrack,
+        LidarConeCluster,
         LidarConeClusters,
     )
-    from geometry_msgs.msg import Point, Vector3
-    from nav_msgs.msg import Odometry
+    from geometry_msgs.msg import Point, PoseStamped, Quaternion, Vector3
+    from nav_msgs.msg import Odometry, Path
     import rclpy
     from rclpy.duration import Duration
     from rclpy.node import Node
     from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
     from rclpy.time import Time
+    from sensor_msgs.msg import CameraInfo
+    from std_msgs.msg import ColorRGBA, String
     from tf2_ros import Buffer, TransformException, TransformListener
+    from visualization_msgs.msg import Marker, MarkerArray
 except ImportError:
     rclpy = None  # type: ignore
 
@@ -39,6 +43,75 @@ except ImportError:
             self.x = float(x)
             self.y = float(y)
             self.z = float(z)
+
+    class Quaternion:  # type: ignore
+        def __init__(
+            self, x: float = 0.0, y: float = 0.0, z: float = 0.0, w: float = 1.0
+        ) -> None:
+            self.x = float(x)
+            self.y = float(y)
+            self.z = float(z)
+            self.w = float(w)
+
+    class _PoseStub:
+        def __init__(self) -> None:
+            self.position = Point()
+            self.orientation = Quaternion()
+
+    class PoseStamped:  # type: ignore
+        def __init__(self) -> None:
+            self.header = _HeaderStub()
+            self.pose = _PoseStub()
+
+    class Path:  # type: ignore
+        def __init__(self) -> None:
+            self.header = _HeaderStub()
+            self.poses: List[PoseStamped] = []
+
+    class ColorRGBA:  # type: ignore
+        def __init__(
+            self, r: float = 0.0, g: float = 0.0, b: float = 0.0, a: float = 1.0
+        ) -> None:
+            self.r = float(r)
+            self.g = float(g)
+            self.b = float(b)
+            self.a = float(a)
+
+    class String:  # type: ignore
+        def __init__(self, data: str = "") -> None:
+            self.data = str(data)
+
+    class _ScaleStub:
+        def __init__(self) -> None:
+            self.x = 0.0
+            self.y = 0.0
+            self.z = 0.0
+
+    class Marker:  # type: ignore
+        ARROW = 0
+        CUBE = 1
+        SPHERE = 2
+        CYLINDER = 3
+        LINE_STRIP = 4
+        TEXT_VIEW_FACING = 9
+        ADD = 0
+        DELETE = 2
+
+        def __init__(self) -> None:
+            self.header = _HeaderStub()
+            self.ns = ""
+            self.id = 0
+            self.type = 0
+            self.action = 0
+            self.pose = _PoseStub()
+            self.scale = _ScaleStub()
+            self.color = ColorRGBA()
+            self.points: List[Point] = []
+            self.text = ""
+
+    class MarkerArray:  # type: ignore
+        def __init__(self) -> None:
+            self.markers: List[Marker] = []
 
     class Vector3:  # type: ignore
         def __init__(self, x: float = 0.0, y: float = 0.0, z: float = 0.0) -> None:
@@ -73,13 +146,37 @@ except ImportError:
             self.quality_score = 0.0
 
     class CameraConeDetections:  # type: ignore
-        pass
+        def __init__(self) -> None:
+            self.header = _HeaderStub()
+            self.detections: List[Any] = []
+            self.image_quality = 1.0
+            self.sensor_health = 0
+
+    class LidarConeCluster:  # type: ignore
+        def __init__(self) -> None:
+            self.centroid = Point()
+            self.covariance = [0.0] * 9
+            self.point_count = 0
+            self.geometry_quality = 1.0
+            self.stripe_class_probs = [0.25, 0.25, 0.25, 0.25]
 
     class LidarConeClusters:  # type: ignore
-        pass
+        def __init__(self) -> None:
+            self.header = _HeaderStub()
+            self.clusters: List[LidarConeCluster] = []
+            self.sensor_health = 0
 
     class Odometry:  # type: ignore
         pass
+
+    class CameraInfo:  # type: ignore
+        def __init__(self) -> None:
+            self.header = _HeaderStub()
+            self.width = 0
+            self.height = 0
+            self.k = [0.0] * 9
+            self.d: List[float] = []
+            self.p = [0.0] * 12
 
     class DiagnosticArray:  # type: ignore
         def __init__(self) -> None:
@@ -136,7 +233,17 @@ except ImportError:
         def __init__(self, *args, **kwargs) -> None:
             pass
 
+from .auto_calibrate import (
+    CalibrationFrameSample,
+    calibrate_lidar_to_camera_extrinsics,
+    calibrate_temporal_sync_offset,
+)
+from .debug_visualizer import (
+    build_reprojection_debug_annotations,
+    build_scene_marker_descriptors,
+)
 from .ekf_tracker import (
+    CorridorEstimate,
     EgoMotionStep,
     MultiTargetEKFTracker,
     Observation2D,
@@ -146,14 +253,27 @@ from .ekf_tracker import (
 )
 from .early_fusion import (
     CameraIntrinsics,
+    CameraSensorProfile,
     EarlyFusionProjector,
     LidarToCameraExtrinsics,
+    MultiCameraEarlyFusion,
 )
 
 
 SENSOR_HEALTH_OK = 0
 SENSOR_HEALTH_DEGRADED = 1
 SENSOR_HEALTH_CRITICAL = 2
+
+
+@dataclass
+class LidarSensorProfile:
+    lidar_id: str
+    topic: str
+    frame_id: str
+    offset_x_m: float = 0.0
+    offset_y_m: float = 0.0
+    offset_z_m: float = 0.0
+    yaw_rad: float = 0.0
 
 
 @dataclass
@@ -190,21 +310,26 @@ class FusionNode(Node):
         self.obs_pub = self.create_publisher(ConeObservation, self.obs_out_topic, output_qos)
         self.track_pub = self.create_publisher(ConeTrack, self.track_out_topic, output_qos)
         self.diag_pub = self.create_publisher(DiagnosticArray, self.diag_topic, diag_qos)
-
-        self.create_subscription(
-            CameraConeDetections, self.camera_topic, self._on_camera, sensor_qos
+        self.corridor_markers_pub = self.create_publisher(
+            MarkerArray,
+            self.corridor_markers_topic or "/perception/corridor_markers",
+            output_qos,
         )
-        if getattr(self, "secondary_camera_topic", ""):
-            self.create_subscription(
-                CameraConeDetections,
-                self.secondary_camera_topic,
-                self._on_camera,
-                sensor_qos,
-            )
-        self.create_subscription(
-            LidarConeClusters, self.lidar_topic, self._on_lidar, sensor_qos
+        self.corridor_path_pub = self.create_publisher(
+            Path,
+            self.corridor_path_topic or "/perception/corridor_path",
+            output_qos,
         )
-        self.create_subscription(Odometry, self.motion_topic, self._on_motion, sensor_qos)
+        self.debug_markers_pub = self.create_publisher(
+            MarkerArray,
+            self.debug_markers_topic or "/perception/debug_markers",
+            output_qos,
+        )
+        self.debug_reprojection_pub = self.create_publisher(
+            String,
+            self.debug_reprojection_topic or "/perception/debug_reprojection",
+            output_qos,
+        )
 
         self.camera_buffer: Deque[Tuple[float, CameraConeDetections]] = deque(
             maxlen=self.queue_size_camera
@@ -213,6 +338,52 @@ class FusionNode(Node):
             maxlen=self.queue_size_lidar
         )
         self.motion_buffer: Deque[Tuple[float, Odometry]] = deque(maxlen=self.queue_size_motion)
+
+        self._build_camera_and_lidar_registries()
+
+        for cam_id, cam_profile in self.camera_profiles.items():
+            if cam_id == "primary":
+                self.create_subscription(
+                    CameraConeDetections, cam_profile.topic, self._on_camera, sensor_qos
+                )
+            else:
+                self.create_subscription(
+                    CameraConeDetections,
+                    cam_profile.topic,
+                    lambda msg, cid=cam_id: self._on_camera(msg, camera_id=cid),
+                    sensor_qos,
+                )
+            if (
+                getattr(self, "enable_camera_info_intrinsics", True)
+                and getattr(cam_profile, "camera_info_topic", "")
+            ):
+                if cam_id == "primary":
+                    self.create_subscription(
+                        CameraInfo,
+                        cam_profile.camera_info_topic,
+                        self._on_camera_info,
+                        sensor_qos,
+                    )
+                else:
+                    self.create_subscription(
+                        CameraInfo,
+                        cam_profile.camera_info_topic,
+                        lambda msg, cid=cam_id: self._on_camera_info(msg, camera_id=cid),
+                        sensor_qos,
+                    )
+        self.create_subscription(
+            LidarConeClusters, self.lidar_topic, self._on_lidar, sensor_qos
+        )
+        for lid_id, lid_profile in self.lidar_profiles.items():
+            if lid_id == "primary":
+                continue
+            self.create_subscription(
+                LidarConeClusters,
+                lid_profile.topic,
+                lambda msg, lid=lid_id: self._on_extra_lidar(msg, lidar_id=lid),
+                sensor_qos,
+            )
+        self.create_subscription(Odometry, self.motion_topic, self._on_motion, sensor_qos)
         self.tracker = MultiTargetEKFTracker(self._tracker_config())
         self.frame_history: List[FrameRecord] = []
         self.history_base_snapshot = self.tracker.empty_snapshot()
@@ -298,7 +469,22 @@ class FusionNode(Node):
             "tf_extrinsics_stale": 0,
             "tf_extrinsics_missing_frame": 0,
             "motion_missing_for_covariance": 0,
+            "online_calib_runs": 0,
+            "online_calib_applied": 0,
+            "corridor_published": 0,
+            "debug_markers_published": 0,
+            "extra_lidar_messages": 0,
+            "camera_info_updates": 0,
         }
+        self.last_corridor_estimate: Optional[CorridorEstimate] = None
+        self.last_debug_markers: List[Any] = []
+        self.last_reprojection_annotations: List[Any] = []
+        self.last_camera_info_cameras: Dict[str, Tuple[float, float, float, float, int, int]] = {}
+        self.calibration_window: Deque[CalibrationFrameSample] = deque(
+            maxlen=max(5, int(getattr(self, "online_calibration_window_frames", 30)))
+        )
+        self._online_calib_frames_since_run = 0
+        self.last_online_calibration_report: Optional[Dict[str, Any]] = None
 
         self.tf_buffer: Optional[Buffer] = None
         self.tf_listener: Optional[TransformListener] = None
@@ -310,9 +496,8 @@ class FusionNode(Node):
         self.create_timer(1.0 / max(0.5, self.diag_rate_hz), self._publish_diagnostics)
 
         self.get_logger().info("fusion_node started")
-        self.get_logger().warn(
-            "Implementation status: prototype. OOSM now uses bounded EKF snapshot rewind/replay, "
-            "but full production validation on target hardware is still required."
+        self.get_logger().info(
+            "Validation note: verify calibrated extrinsics and clock sync on target vehicle before track deployment."
         )
         self.get_logger().info(
             "projection semantics: "
@@ -425,8 +610,34 @@ class FusionNode(Node):
             ("global_map_min_lap_distance_m", 40.0),
             ("enable_lidar_stripe_semantics", True),
             ("enable_corridor_output", False),
+            ("corridor_markers_topic", "/perception/corridor_markers"),
+            ("corridor_path_topic", "/perception/corridor_path"),
+            ("corridor_horizon_m", 20.0),
+            ("corridor_step_m", 1.0),
             ("enable_debug_viz", False),
+            ("debug_markers_topic", "/perception/debug_markers"),
+            ("debug_reprojection_topic", "/perception/debug_reprojection"),
+            ("enable_online_calibration", False),
+            ("online_calibration_window_frames", 30),
+            ("online_calibration_min_pairs", 12),
+            ("online_calibration_apply_extrinsics", False),
             ("secondary_camera_topic", ""),
+            ("enable_camera_info_intrinsics", True),
+            ("camera_info_topic", "/camera/camera_info"),
+            ("secondary_camera_info_topic", ""),
+            ("camera_profiles_json", ""),
+            ("secondary_camera_fx", 0.0),
+            ("secondary_camera_fy", 0.0),
+            ("secondary_camera_cx", 0.0),
+            ("secondary_camera_cy", 0.0),
+            ("secondary_lidar_to_camera_tx_m", 0.0),
+            ("secondary_lidar_to_camera_ty_m", 0.0),
+            ("secondary_lidar_to_camera_tz_m", 0.0),
+            ("secondary_lidar_to_camera_roll_rad", 0.0),
+            ("secondary_lidar_to_camera_pitch_rad", 0.0),
+            ("secondary_lidar_to_camera_yaw_rad", 0.0),
+            ("lidar_topics_extra", [""]),
+            ("lidar_profiles_json", ""),
             ("require_camera_for_single_point_clusters", True),
             ("assume_uncounted_clusters_valid", True),
             ("min_uncorroborated_cluster_points", 2),
@@ -657,11 +868,97 @@ class FusionNode(Node):
         self.enable_corridor_output = bool(
             self.get_parameter("enable_corridor_output").value
         )
+        self.corridor_markers_topic = str(
+            self.get_parameter("corridor_markers_topic").value
+        ).strip()
+        self.corridor_path_topic = str(
+            self.get_parameter("corridor_path_topic").value
+        ).strip()
+        self.corridor_horizon_m = float(
+            self.get_parameter("corridor_horizon_m").value
+        )
+        self.corridor_step_m = float(
+            self.get_parameter("corridor_step_m").value
+        )
         self.enable_debug_viz = bool(
             self.get_parameter("enable_debug_viz").value
         )
+        self.debug_markers_topic = str(
+            self.get_parameter("debug_markers_topic").value
+        ).strip()
+        self.debug_reprojection_topic = str(
+            self.get_parameter("debug_reprojection_topic").value
+        ).strip()
+        self.enable_online_calibration = bool(
+            self.get_parameter("enable_online_calibration").value
+        )
+        self.online_calibration_window_frames = max(
+            5, int(self.get_parameter("online_calibration_window_frames").value)
+        )
+        self.online_calibration_min_pairs = max(
+            3, int(self.get_parameter("online_calibration_min_pairs").value)
+        )
+        self.online_calibration_apply_extrinsics = bool(
+            self.get_parameter("online_calibration_apply_extrinsics").value
+        )
         self.secondary_camera_topic = str(
             self.get_parameter("secondary_camera_topic").value
+        ).strip()
+        self.enable_camera_info_intrinsics = bool(
+            self.get_parameter("enable_camera_info_intrinsics").value
+        )
+        self.camera_info_topic = str(
+            self.get_parameter("camera_info_topic").value
+        ).strip()
+        self.secondary_camera_info_topic = str(
+            self.get_parameter("secondary_camera_info_topic").value
+        ).strip()
+        self.camera_profiles_json = str(
+            self.get_parameter("camera_profiles_json").value
+        ).strip()
+        self.secondary_camera_fx = float(
+            self.get_parameter("secondary_camera_fx").value
+        )
+        self.secondary_camera_fy = float(
+            self.get_parameter("secondary_camera_fy").value
+        )
+        self.secondary_camera_cx = float(
+            self.get_parameter("secondary_camera_cx").value
+        )
+        self.secondary_camera_cy = float(
+            self.get_parameter("secondary_camera_cy").value
+        )
+        self.secondary_lidar_to_camera_tx_m = float(
+            self.get_parameter("secondary_lidar_to_camera_tx_m").value
+        )
+        self.secondary_lidar_to_camera_ty_m = float(
+            self.get_parameter("secondary_lidar_to_camera_ty_m").value
+        )
+        self.secondary_lidar_to_camera_tz_m = float(
+            self.get_parameter("secondary_lidar_to_camera_tz_m").value
+        )
+        self.secondary_lidar_to_camera_roll_rad = float(
+            self.get_parameter("secondary_lidar_to_camera_roll_rad").value
+        )
+        self.secondary_lidar_to_camera_pitch_rad = float(
+            self.get_parameter("secondary_lidar_to_camera_pitch_rad").value
+        )
+        self.secondary_lidar_to_camera_yaw_rad = float(
+            self.get_parameter("secondary_lidar_to_camera_yaw_rad").value
+        )
+        raw_lidar_extra = self.get_parameter("lidar_topics_extra").value
+        if isinstance(raw_lidar_extra, str):
+            self.lidar_topics_extra = [
+                part.strip() for part in raw_lidar_extra.split(",") if part.strip()
+            ]
+        elif isinstance(raw_lidar_extra, (list, tuple)):
+            self.lidar_topics_extra = [
+                str(part).strip() for part in raw_lidar_extra if str(part).strip()
+            ]
+        else:
+            self.lidar_topics_extra = []
+        self.lidar_profiles_json = str(
+            self.get_parameter("lidar_profiles_json").value
         ).strip()
         self.require_camera_for_single_point_clusters = bool(
             self.get_parameter("require_camera_for_single_point_clusters").value
@@ -775,7 +1072,188 @@ class FusionNode(Node):
             enable_frustum_hull_sampling=getattr(self, "enable_frustum_hull_sampling", False),
         )
 
-    def _on_camera(self, msg: CameraConeDetections) -> None:
+    def _make_projector(
+        self,
+        intrinsics: CameraIntrinsics,
+        extrinsics: LidarToCameraExtrinsics,
+    ) -> EarlyFusionProjector:
+        return EarlyFusionProjector(
+            intrinsics=intrinsics,
+            extrinsics=extrinsics,
+            min_depth_m=self.projection_min_depth_m,
+            max_depth_m=self.projection_max_depth_m,
+            sample_radius_scale=self.projection_sample_radius_scale,
+            min_semantic_weight=self.projection_min_semantic_weight,
+            no_match_semantic_weight=self.projection_no_match_semantic_weight,
+            soft_likelihood_enabled=self.projection_soft_likelihood_enabled,
+            soft_likelihood_sigma_scale=self.projection_soft_likelihood_sigma_scale,
+            soft_likelihood_min_value=self.projection_soft_likelihood_min_value,
+            soft_likelihood_outside_ratio=self.projection_soft_likelihood_outside_ratio,
+            aero_pitch_rad_per_mps2=self.aero_pitch_rad_per_mps2,
+            aero_tz_m_per_mps2=self.aero_tz_m_per_mps2,
+            enable_frustum_hull_sampling=getattr(self, "enable_frustum_hull_sampling", False),
+        )
+
+    def _build_camera_and_lidar_registries(self) -> None:
+        self.camera_profiles: Dict[str, CameraSensorProfile] = {
+            "primary": CameraSensorProfile(
+                camera_id="primary",
+                topic=self.camera_topic,
+                frame_id=self.tf_extrinsics_camera_frame or "camera_optical",
+                projector=self.projector,
+                use_tf_extrinsics=self.use_tf_extrinsics,
+                camera_info_topic=getattr(self, "camera_info_topic", ""),
+            )
+        }
+        sec_topic = getattr(self, "secondary_camera_topic", "").strip()
+        if sec_topic and sec_topic != self.camera_topic:
+            sec_fx = self.secondary_camera_fx if self.secondary_camera_fx > 0.0 else self.camera_fx
+            sec_fy = self.secondary_camera_fy if self.secondary_camera_fy > 0.0 else self.camera_fy
+            sec_cx = self.secondary_camera_cx if self.secondary_camera_cx > 0.0 else self.camera_cx
+            sec_cy = self.secondary_camera_cy if self.secondary_camera_cy > 0.0 else self.camera_cy
+            sec_intr = CameraIntrinsics(
+                fx=sec_fx,
+                fy=sec_fy,
+                cx=sec_cx,
+                cy=sec_cy,
+                width=max(1, self.camera_width),
+                height=max(1, self.camera_height),
+                k1=getattr(self, "camera_k1", 0.0),
+                k2=getattr(self, "camera_k2", 0.0),
+                p1=getattr(self, "camera_p1", 0.0),
+                p2=getattr(self, "camera_p2", 0.0),
+                k3=getattr(self, "camera_k3", 0.0),
+            )
+            sec_ext = LidarToCameraExtrinsics.from_rpy_translation(
+                tx=getattr(self, "secondary_lidar_to_camera_tx_m", 0.0),
+                ty=getattr(self, "secondary_lidar_to_camera_ty_m", 0.0),
+                tz=getattr(self, "secondary_lidar_to_camera_tz_m", 0.0),
+                roll=getattr(self, "secondary_lidar_to_camera_roll_rad", 0.0),
+                pitch=getattr(self, "secondary_lidar_to_camera_pitch_rad", 0.0),
+                yaw=getattr(self, "secondary_lidar_to_camera_yaw_rad", 0.0),
+            )
+            self.camera_profiles["secondary"] = CameraSensorProfile(
+                camera_id="secondary",
+                topic=sec_topic,
+                frame_id="secondary_camera_optical",
+                projector=self._make_projector(sec_intr, sec_ext),
+                use_tf_extrinsics=False,
+                camera_info_topic=getattr(self, "secondary_camera_info_topic", ""),
+            )
+
+        cam_json = getattr(self, "camera_profiles_json", "").strip()
+        if cam_json:
+            try:
+                parsed = json.loads(cam_json)
+                if isinstance(parsed, dict):
+                    entries = [
+                        {"camera_id": k, **v} if isinstance(v, dict) else {"camera_id": k}
+                        for k, v in parsed.items()
+                    ]
+                elif isinstance(parsed, list):
+                    entries = parsed
+                else:
+                    entries = []
+                for idx, entry in enumerate(entries):
+                    if not isinstance(entry, dict):
+                        continue
+                    cid = str(entry.get("camera_id", f"cam_{idx}")).strip() or f"cam_{idx}"
+                    topic = str(entry.get("topic", "")).strip()
+                    if not topic:
+                        continue
+                    intr = CameraIntrinsics(
+                        fx=float(entry.get("fx", self.camera_fx)),
+                        fy=float(entry.get("fy", self.camera_fy)),
+                        cx=float(entry.get("cx", self.camera_cx)),
+                        cy=float(entry.get("cy", self.camera_cy)),
+                        width=max(1, int(entry.get("width", self.camera_width))),
+                        height=max(1, int(entry.get("height", self.camera_height))),
+                        k1=float(entry.get("k1", getattr(self, "camera_k1", 0.0))),
+                        k2=float(entry.get("k2", getattr(self, "camera_k2", 0.0))),
+                        p1=float(entry.get("p1", getattr(self, "camera_p1", 0.0))),
+                        p2=float(entry.get("p2", getattr(self, "camera_p2", 0.0))),
+                        k3=float(entry.get("k3", getattr(self, "camera_k3", 0.0))),
+                    )
+                    ext = LidarToCameraExtrinsics.from_rpy_translation(
+                        tx=float(entry.get("tx_m", entry.get("tx", self.lidar_to_camera_tx_m))),
+                        ty=float(entry.get("ty_m", entry.get("ty", self.lidar_to_camera_ty_m))),
+                        tz=float(entry.get("tz_m", entry.get("tz", self.lidar_to_camera_tz_m))),
+                        roll=float(entry.get("roll_rad", entry.get("roll", self.lidar_to_camera_roll_rad))),
+                        pitch=float(entry.get("pitch_rad", entry.get("pitch", self.lidar_to_camera_pitch_rad))),
+                        yaw=float(entry.get("yaw_rad", entry.get("yaw", self.lidar_to_camera_yaw_rad))),
+                    )
+                    self.camera_profiles[cid] = CameraSensorProfile(
+                        camera_id=cid,
+                        topic=topic,
+                        frame_id=str(entry.get("frame_id", cid)).strip() or cid,
+                        projector=self._make_projector(intr, ext),
+                        use_tf_extrinsics=bool(entry.get("use_tf_extrinsics", False)),
+                        camera_info_topic=str(entry.get("camera_info_topic", "")).strip(),
+                    )
+                    if cid == "primary":
+                        self.projector = self.camera_profiles[cid].projector
+            except Exception as exc:
+                self.get_logger().warning(f"Invalid camera_profiles_json ignored: {exc}")
+
+        self.multi_camera_fusion = MultiCameraEarlyFusion(self.camera_profiles)
+        self.camera_buffers: Dict[str, Deque[Tuple[float, CameraConeDetections]]] = {}
+        for cid in self.camera_profiles:
+            if cid == "primary":
+                self.camera_buffers[cid] = self.camera_buffer
+            else:
+                self.camera_buffers[cid] = deque(maxlen=self.queue_size_camera)
+
+        self.lidar_profiles: Dict[str, LidarSensorProfile] = {
+            "primary": LidarSensorProfile(
+                lidar_id="primary",
+                topic=self.lidar_topic,
+                frame_id=self.target_frame or "lidar",
+            )
+        }
+        seen_lidar_topics = {self.lidar_topic}
+        for idx, topic in enumerate(getattr(self, "lidar_topics_extra", []) or []):
+            t = str(topic).strip()
+            if not t or t in seen_lidar_topics:
+                continue
+            seen_lidar_topics.add(t)
+            lid_id = f"lidar_extra_{idx}"
+            self.lidar_profiles[lid_id] = LidarSensorProfile(
+                lidar_id=lid_id, topic=t, frame_id=lid_id
+            )
+
+        lidar_json = getattr(self, "lidar_profiles_json", "").strip()
+        if lidar_json:
+            try:
+                parsed = json.loads(lidar_json)
+                if isinstance(parsed, dict):
+                    entries = [
+                        {"lidar_id": k, **v} if isinstance(v, dict) else {"lidar_id": k}
+                        for k, v in parsed.items()
+                    ]
+                elif isinstance(parsed, list):
+                    entries = parsed
+                else:
+                    entries = []
+                for idx, entry in enumerate(entries):
+                    if not isinstance(entry, dict):
+                        continue
+                    lid_id = str(entry.get("lidar_id", f"lidar_{idx}")).strip() or f"lidar_{idx}"
+                    topic = str(entry.get("topic", "")).strip()
+                    if not topic:
+                        continue
+                    self.lidar_profiles[lid_id] = LidarSensorProfile(
+                        lidar_id=lid_id,
+                        topic=topic,
+                        frame_id=str(entry.get("frame_id", lid_id)).strip() or lid_id,
+                        offset_x_m=float(entry.get("offset_x_m", entry.get("tx_m", 0.0))),
+                        offset_y_m=float(entry.get("offset_y_m", entry.get("ty_m", 0.0))),
+                        offset_z_m=float(entry.get("offset_z_m", entry.get("tz_m", 0.0))),
+                        yaw_rad=float(entry.get("yaw_rad", entry.get("yaw", 0.0))),
+                    )
+            except Exception as exc:
+                self.get_logger().warning(f"Invalid lidar_profiles_json ignored: {exc}")
+
+    def _on_camera(self, msg: CameraConeDetections, camera_id: str = "primary") -> None:
         stamp = self._stamp_to_sec(msg.header.stamp.sec, msg.header.stamp.nanosec)
         if stamp + self.max_rewind_s < self.last_processed_lidar_stamp:
             self.counters["oosm_dropped"] += 1
@@ -783,7 +1261,83 @@ class FusionNode(Node):
         if stamp < self.last_processed_lidar_stamp:
             self.counters["oosm_within_budget"] += 1
             self._request_replay(stamp)
-        self._push_sorted(self.camera_buffer, (stamp, msg), "camera_overflow")
+        cam_buffers = getattr(self, "camera_buffers", None)
+        target_buf = (
+            cam_buffers[camera_id]
+            if cam_buffers is not None and camera_id in cam_buffers
+            else self.camera_buffer
+        )
+        self._push_sorted(target_buf, (stamp, msg), "camera_overflow")
+
+    def _on_extra_lidar(self, msg: LidarConeClusters, lidar_id: str) -> None:
+        profiles = getattr(self, "lidar_profiles", {})
+        profile = profiles.get(lidar_id)
+        if "extra_lidar_messages" in self.counters:
+            self.counters["extra_lidar_messages"] += 1
+        if profile is None or (
+            abs(profile.offset_x_m) < 1e-9
+            and abs(profile.offset_y_m) < 1e-9
+            and abs(profile.offset_z_m) < 1e-9
+            and abs(profile.yaw_rad) < 1e-9
+        ):
+            self._on_lidar(msg)
+            return
+
+        c_y = math.cos(profile.yaw_rad)
+        s_y = math.sin(profile.yaw_rad)
+        transformed = LidarConeClusters()
+        if transformed.header.stamp is not None and hasattr(msg.header.stamp, "sec"):
+            transformed.header.stamp.sec = int(msg.header.stamp.sec)
+            transformed.header.stamp.nanosec = int(msg.header.stamp.nanosec)
+        else:
+            transformed.header.stamp = msg.header.stamp
+        transformed.header.frame_id = self.target_frame or msg.header.frame_id
+        if hasattr(transformed, "lidar_quality") and hasattr(msg, "lidar_quality"):
+            transformed.lidar_quality = float(msg.lidar_quality)
+        if hasattr(transformed, "sensor_health") and hasattr(msg, "sensor_health"):
+            transformed.sensor_health = msg.sensor_health
+        out_clusters = []
+        for c in msg.clusters:
+            x = float(c.centroid.x)
+            y = float(c.centroid.y)
+            z = float(c.centroid.z)
+            nc = LidarConeCluster()
+            nc.centroid = Point(
+                x=c_y * x - s_y * y + profile.offset_x_m,
+                y=s_y * x + c_y * y + profile.offset_y_m,
+                z=z + profile.offset_z_m,
+            )
+            cov = list(c.covariance) if len(c.covariance) == 9 else [0.25, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.25]
+            if abs(profile.yaw_rad) >= 1e-9:
+                c00, c01, c02 = float(cov[0]), float(cov[1]), float(cov[2])
+                c10, c11, c12 = float(cov[3]), float(cov[4]), float(cov[5])
+                c20, c21, c22 = float(cov[6]), float(cov[7]), float(cov[8])
+                t00 = c_y * c00 - s_y * c10
+                t01 = c_y * c01 - s_y * c11
+                t10 = s_y * c00 + c_y * c10
+                t11 = s_y * c01 + c_y * c11
+                nc.covariance = [
+                    t00 * c_y - t01 * s_y,
+                    t00 * s_y + t01 * c_y,
+                    c_y * c02 - s_y * c12,
+                    t10 * c_y - t11 * s_y,
+                    t10 * s_y + t11 * c_y,
+                    s_y * c02 + c_y * c12,
+                    c20 * c_y - c21 * s_y,
+                    c20 * s_y + c21 * c_y,
+                    c22,
+                ]
+            else:
+                nc.covariance = cov
+            if hasattr(c, "point_count"):
+                nc.point_count = c.point_count
+            if hasattr(c, "geometry_quality"):
+                nc.geometry_quality = c.geometry_quality
+            if hasattr(c, "stripe_class_probs"):
+                nc.stripe_class_probs = list(c.stripe_class_probs)
+            out_clusters.append(nc)
+        transformed.clusters = out_clusters
+        self._on_lidar(transformed)
 
     def _on_lidar(self, msg: LidarConeClusters) -> None:
         stamp = self._stamp_to_sec(msg.header.stamp.sec, msg.header.stamp.nanosec)
@@ -853,18 +1407,14 @@ class FusionNode(Node):
             return
 
         camera_lookup_start_ns = time.perf_counter_ns()
-        camera_msg = None
-        nearest_camera = self._nearest_camera(lidar_stamp)
-        if nearest_camera is not None:
-            cam_stamp, cam_msg = nearest_camera
-            self._update_camera_lidar_sync(cam_stamp, lidar_stamp)
-            if abs(cam_stamp - lidar_stamp) <= self.max_camera_lidar_delta_s:
-                camera_msg = cam_msg
-            else:
-                self.counters["camera_miss"] += 1
+        camera_msg, camera_msgs_by_cam = self._lookup_active_cameras(lidar_stamp)
         self._record_stage_timing("camera_lookup", self._elapsed_ms(camera_lookup_start_ns))
         extrinsics_start_ns = time.perf_counter_ns()
-        self._refresh_projector_extrinsics(lidar_msg=lidar_msg, camera_msg=camera_msg)
+        self._refresh_projector_extrinsics(
+            lidar_msg=lidar_msg,
+            camera_msg=camera_msg,
+            camera_msgs_by_cam=camera_msgs_by_cam,
+        )
         self._record_stage_timing("extrinsics_lookup", self._elapsed_ms(extrinsics_start_ns))
 
         is_oosm_lidar = lidar_stamp < self.last_processed_lidar_stamp
@@ -874,6 +1424,7 @@ class FusionNode(Node):
             lidar_msg=lidar_msg,
             camera_msg=camera_msg,
             source=source,
+            camera_msgs_by_cam=camera_msgs_by_cam,
         )
         self._record_stage_timing("build_observations", self._elapsed_ms(build_start_ns))
         publish_start_ns = time.perf_counter_ns()
@@ -973,21 +1524,18 @@ class FusionNode(Node):
 
         for frame in replay_frames:
             self._update_motion_alignment(frame.stamp)
-            camera_msg = None
-            nearest_camera = self._nearest_camera(frame.stamp)
-            if nearest_camera is not None:
-                cam_stamp, cam_msg = nearest_camera
-                self._update_camera_lidar_sync(cam_stamp, frame.stamp)
-                if abs(cam_stamp - frame.stamp) <= self.max_camera_lidar_delta_s:
-                    camera_msg = cam_msg
+            camera_msg, camera_msgs_by_cam = self._lookup_active_cameras(frame.stamp)
             self._refresh_projector_extrinsics(
-                lidar_msg=frame.lidar_msg, camera_msg=camera_msg
+                lidar_msg=frame.lidar_msg,
+                camera_msg=camera_msg,
+                camera_msgs_by_cam=camera_msgs_by_cam,
             )
 
             observations, tracker_observations = self._build_observations(
                 lidar_msg=frame.lidar_msg,
                 camera_msg=camera_msg,
                 source="replay",
+                camera_msgs_by_cam=camera_msgs_by_cam,
             )
             self._publish_observation_messages(observations)
             snapshot_before = self.tracker.snapshot()
@@ -1066,11 +1614,78 @@ class FusionNode(Node):
             return None
         return min(self.camera_buffer, key=lambda pair: abs(pair[0] - reference_stamp))
 
+    def _nearest_camera_for_id(
+        self, reference_stamp: float, camera_id: str = "primary"
+    ) -> Optional[Tuple[float, CameraConeDetections]]:
+        if camera_id == "primary":
+            return self._nearest_camera(reference_stamp)
+        cam_buffers = getattr(self, "camera_buffers", {})
+        buf = cam_buffers.get(camera_id)
+        if buf is None:
+            return None
+        while buf:
+            oldest_stamp = buf[0][0]
+            if reference_stamp - oldest_stamp > self.camera_retention_s:
+                buf.popleft()
+            else:
+                break
+        if not buf:
+            return None
+        return min(buf, key=lambda pair: abs(pair[0] - reference_stamp))
+
+    def _lookup_active_cameras(
+        self, lidar_stamp: float
+    ) -> Tuple[Optional[CameraConeDetections], Dict[str, CameraConeDetections]]:
+        profiles = getattr(self, "camera_profiles", None)
+        if not profiles or len(profiles) <= 1:
+            camera_msg = None
+            nearest_camera = self._nearest_camera(lidar_stamp)
+            if nearest_camera is not None:
+                cam_stamp, cam_msg = nearest_camera
+                self._update_camera_lidar_sync(cam_stamp, lidar_stamp)
+                if abs(cam_stamp - lidar_stamp) <= self.max_camera_lidar_delta_s:
+                    camera_msg = cam_msg
+                else:
+                    self.counters["camera_miss"] += 1
+            by_cam = {"primary": camera_msg} if camera_msg is not None else {}
+            return camera_msg, by_cam
+
+        by_cam: Dict[str, CameraConeDetections] = {}
+        primary_msg: Optional[CameraConeDetections] = None
+        primary_synced = False
+        for cam_id in profiles:
+            nearest = self._nearest_camera_for_id(lidar_stamp, cam_id)
+            if nearest is None:
+                continue
+            cam_stamp, cam_msg = nearest
+            if cam_id == "primary":
+                self._update_camera_lidar_sync(cam_stamp, lidar_stamp)
+                primary_synced = True
+            if abs(cam_stamp - lidar_stamp) <= self.max_camera_lidar_delta_s:
+                by_cam[cam_id] = cam_msg
+                if cam_id == "primary":
+                    primary_msg = cam_msg
+
+        if not primary_synced and by_cam:
+            first_msg = next(iter(by_cam.values()))
+            cam_stamp = self._stamp_to_sec(
+                first_msg.header.stamp.sec, first_msg.header.stamp.nanosec
+            )
+            self._update_camera_lidar_sync(cam_stamp, lidar_stamp)
+        if not by_cam and any(
+            getattr(self, "camera_buffers", {}).get(cid) for cid in profiles
+        ):
+            self.counters["camera_miss"] += 1
+        if primary_msg is None and by_cam:
+            primary_msg = next(iter(by_cam.values()))
+        return primary_msg, by_cam
+
     def _build_observations(
         self,
         lidar_msg: LidarConeClusters,
         camera_msg: Optional[CameraConeDetections],
         source: str,
+        camera_msgs_by_cam: Optional[Dict[str, CameraConeDetections]] = None,
     ) -> Tuple[List[ConeObservation], List[Observation2D]]:
         fallback_class_probs = (
             [0.25, 0.25, 0.25, 0.25]
@@ -1081,6 +1696,8 @@ class FusionNode(Node):
         health = self._health_code(camera_msg, lidar_msg)
         self.last_health = health
         detections = []
+        detections_by_cam: Dict[str, List[Any]] = {}
+        cam_stamps_by_cam: Dict[str, float] = {}
         lidar_stamp_s = self._stamp_to_sec(
             lidar_msg.header.stamp.sec, lidar_msg.header.stamp.nanosec
         )
@@ -1091,12 +1708,45 @@ class FusionNode(Node):
             if camera_msg is not None and hasattr(camera_msg, "header")
             else lidar_stamp_s
         )
-        if self.enable_projection_semantics and camera_msg is not None:
-            use_att = bool(getattr(self, "enable_chassis_attitude_compensation", True))
+        use_att = bool(getattr(self, "enable_chassis_attitude_compensation", True))
+        ego_speed = getattr(self, "last_ego_speed_mps", 0.0)
+        ego_pitch = getattr(self, "last_ego_pitch_rad", 0.0) if use_att else 0.0
+        ego_roll = getattr(self, "last_ego_roll_rad", 0.0) if use_att else 0.0
+
+        multi_cam_fusion = getattr(self, "multi_camera_fusion", None)
+        use_multi_cam = (
+            self.enable_projection_semantics
+            and multi_cam_fusion is not None
+            and len(getattr(multi_cam_fusion, "profiles", {})) > 1
+            and bool(camera_msgs_by_cam)
+        )
+
+        if use_multi_cam and camera_msgs_by_cam is not None:
+            for cam_id, cam_msg_item in camera_msgs_by_cam.items():
+                prof = multi_cam_fusion.profiles.get(cam_id)
+                if prof is None:
+                    continue
+                prof.projector.apply_aero_compensation(
+                    ego_speed,
+                    chassis_pitch_rad=ego_pitch,
+                    chassis_roll_rad=ego_roll,
+                )
+                detections_by_cam[cam_id] = prof.projector.detections_from_msg(cam_msg_item)
+                cam_stamps_by_cam[cam_id] = (
+                    self._stamp_to_sec(
+                        cam_msg_item.header.stamp.sec, cam_msg_item.header.stamp.nanosec
+                    )
+                    if hasattr(cam_msg_item, "header")
+                    else lidar_stamp_s
+                )
+            detections = detections_by_cam.get("primary", [])
+            if not detections and detections_by_cam:
+                detections = next(iter(detections_by_cam.values()))
+        elif self.enable_projection_semantics and camera_msg is not None:
             self.projector.apply_aero_compensation(
-                getattr(self, "last_ego_speed_mps", 0.0),
-                chassis_pitch_rad=getattr(self, "last_ego_pitch_rad", 0.0) if use_att else 0.0,
-                chassis_roll_rad=getattr(self, "last_ego_roll_rad", 0.0) if use_att else 0.0,
+                ego_speed,
+                chassis_pitch_rad=ego_pitch,
+                chassis_roll_rad=ego_roll,
             )
             detections = self.projector.detections_from_msg(camera_msg)
 
@@ -1119,7 +1769,36 @@ class FusionNode(Node):
         )
 
         batch_estimates = None
-        if (
+        if use_multi_cam and sorted_clusters and any(detections_by_cam.values()):
+            clusters_lidar_by_cam: Dict[
+                str, List[Tuple[Tuple[float, float, float], List[float]]]
+            ] = {}
+            for cam_id, cam_dets in detections_by_cam.items():
+                if not cam_dets:
+                    continue
+                target_cam_stamp = cam_stamps_by_cam.get(cam_id, lidar_stamp_s)
+                clusters_lidar_by_cam[cam_id] = [
+                    (
+                        self._transform_point_between_stamps(
+                            (
+                                float(c.centroid.x),
+                                float(c.centroid.y),
+                                float(c.centroid.z),
+                            ),
+                            from_stamp=lidar_stamp_s,
+                            to_stamp=target_cam_stamp,
+                        ),
+                        list(c.covariance),
+                    )
+                    for c in sorted_clusters
+                ]
+            if clusters_lidar_by_cam:
+                batch_estimates = multi_cam_fusion.estimate_batch_multi_camera_semantics(
+                    clusters_lidar_by_cam=clusters_lidar_by_cam,
+                    detections_by_cam=detections_by_cam,
+                    fallback_probs=fallback_class_probs,
+                )
+        elif (
             self.enable_projection_semantics
             and camera_msg is not None
             and getattr(self, "enable_hungarian_early_fusion", False)
@@ -1147,6 +1826,10 @@ class FusionNode(Node):
                 fallback_probs=fallback_class_probs,
             )
 
+        active_cam_present = (camera_msg is not None) or (
+            use_multi_cam and any(detections_by_cam.values())
+        )
+
         for c_idx, cluster in enumerate(sorted_clusters):
             c_pos = (
                 float(cluster.centroid.x),
@@ -1162,10 +1845,11 @@ class FusionNode(Node):
             semantic_weight = fallback_semantic_weight
             cluster_residual_mean_px = 0.0
             matched_det_idx = None
-            if self.enable_projection_semantics and camera_msg is not None:
+            estimate = None
+            if self.enable_projection_semantics and active_cam_present:
                 if batch_estimates is not None:
                     estimate = batch_estimates[c_idx]
-                else:
+                elif camera_msg is not None:
                     c_pos_at_cam = self._transform_point_between_stamps(
                         c_pos, from_stamp=lidar_stamp_s, to_stamp=cam_stamp_s
                     )
@@ -1176,11 +1860,12 @@ class FusionNode(Node):
                         fallback_probs=fallback_class_probs,
                         excluded_detection_indices=matched_detection_indices,
                     )
-                class_probs = [float(v) for v in estimate.class_probs]
-                semantic_weight = float(estimate.semantic_weight)
-                matched_det_idx = estimate.diagnostics.matched_detection_idx
-                if matched_det_idx is not None:
-                    matched_detection_indices.append(int(matched_det_idx))
+                if estimate is not None:
+                    class_probs = [float(v) for v in estimate.class_probs]
+                    semantic_weight = float(estimate.semantic_weight)
+                    matched_det_idx = estimate.diagnostics.matched_detection_idx
+                    if matched_det_idx is not None:
+                        matched_detection_indices.append(int(matched_det_idx))
             if (
                 matched_det_idx is None
                 and getattr(self, "enable_lidar_stripe_semantics", True)
@@ -1195,7 +1880,7 @@ class FusionNode(Node):
             if req_cam_single and pt_cnt < min_uncorr_pts and matched_det_idx is None:
                 continue
             cluster_positions.append(c_pos)
-            if self.enable_projection_semantics and camera_msg is not None:
+            if self.enable_projection_semantics and estimate is not None:
                 self.counters["projection_projected_samples"] += int(
                     estimate.diagnostics.projected_samples
                 )
@@ -1275,52 +1960,99 @@ class FusionNode(Node):
         if (
             getattr(self, "enable_bidirectional_frustum_fusion", False)
             and self.enable_projection_semantics
-            and detections
-            and camera_msg is not None
+            and active_cam_present
         ):
-            recovered_cones = self.projector.recover_unmatched_detections(
-                detections=detections,
-                matched_detection_indices=matched_detection_indices,
-                existing_positions=cluster_positions,
-                cone_height_m=getattr(self, "camera_fallback_cone_height_m", 0.30),
-                min_confidence=getattr(self, "frustum_min_confidence", 0.55),
-                min_bbox_height_px=getattr(self, "camera_fallback_min_bbox_height_px", 8.0),
-                min_depth_m=getattr(self, "camera_fallback_min_depth_m", 2.0),
-                max_depth_m=getattr(self, "camera_fallback_max_depth_m", 35.0),
-                dedup_radius_m=getattr(self, "frustum_dedup_radius_m", 1.2),
-            )
-            img_q = float(getattr(camera_msg, "image_quality", 1.0))
-            for rec in recovered_cones:
-                rec_pos_lidar = self._transform_point_between_stamps(
-                    rec.position, from_stamp=cam_stamp_s, to_stamp=lidar_stamp_s
+            if use_multi_cam and camera_msgs_by_cam is not None:
+                recovered_by_cam = multi_cam_fusion.recover_multi_camera_unmatched_detections(
+                    detections_by_cam=detections_by_cam,
+                    matched_indices_by_cam=multi_cam_fusion.last_matched_indices_by_cam,
+                    existing_positions=cluster_positions,
+                    cone_height_m=getattr(self, "camera_fallback_cone_height_m", 0.30),
+                    min_confidence=getattr(self, "frustum_min_confidence", 0.55),
+                    min_bbox_height_px=getattr(self, "camera_fallback_min_bbox_height_px", 8.0),
+                    min_depth_m=getattr(self, "camera_fallback_min_depth_m", 2.0),
+                    max_depth_m=getattr(self, "camera_fallback_max_depth_m", 35.0),
+                    dedup_radius_m=getattr(self, "frustum_dedup_radius_m", 1.2),
                 )
-                obs = ConeObservation()
-                obs.header.stamp = lidar_msg.header.stamp
-                obs.header.frame_id = frame_id
-                obs.position = Point(
-                    x=float(rec_pos_lidar[0]),
-                    y=float(rec_pos_lidar[1]),
-                    z=float(rec_pos_lidar[2]),
+                for cid, rec_list in recovered_by_cam.items():
+                    c_stamp_item = cam_stamps_by_cam.get(cid, lidar_stamp_s)
+                    c_msg_ref = camera_msgs_by_cam.get(cid, camera_msg)
+                    img_q = float(getattr(c_msg_ref, "image_quality", 1.0))
+                    for rec in rec_list:
+                        rec_pos_lidar = self._transform_point_between_stamps(
+                            rec.position, from_stamp=c_stamp_item, to_stamp=lidar_stamp_s
+                        )
+                        obs = ConeObservation()
+                        obs.header.stamp = lidar_msg.header.stamp
+                        obs.header.frame_id = frame_id
+                        obs.position = Point(
+                            x=float(rec_pos_lidar[0]),
+                            y=float(rec_pos_lidar[1]),
+                            z=float(rec_pos_lidar[2]),
+                        )
+                        obs.covariance = self._scaled_covariance(
+                            covariance=rec.covariance,
+                            health=health,
+                            projection_residual_mean_px=0.0,
+                            camera_lidar_abs_delta_ms=self.last_camera_lidar_abs_delta_ms,
+                            motion_age_ms=self.last_motion_age_ms,
+                            motion_comp_error_m=self.last_motion_comp_error_m,
+                        )
+                        obs.class_probs = [float(v) for v in rec.class_probs]
+                        obs.quality_score = float(
+                            max(0.1, min(1.0, rec.confidence * img_q * 0.70))
+                        )
+                        obs.sensor_health = health
+                        obs.source = f"{source}_frustum_recovered"
+                        observations.append(obs)
+                        if "frustum_recovered_observations" in self.counters:
+                            self.counters["frustum_recovered_observations"] += 1
+                        if getattr(self, "enable_tracks", True):
+                            tracker_observations.append(self._to_tracker_observation(obs))
+            elif detections and camera_msg is not None:
+                recovered_cones = self.projector.recover_unmatched_detections(
+                    detections=detections,
+                    matched_detection_indices=matched_detection_indices,
+                    existing_positions=cluster_positions,
+                    cone_height_m=getattr(self, "camera_fallback_cone_height_m", 0.30),
+                    min_confidence=getattr(self, "frustum_min_confidence", 0.55),
+                    min_bbox_height_px=getattr(self, "camera_fallback_min_bbox_height_px", 8.0),
+                    min_depth_m=getattr(self, "camera_fallback_min_depth_m", 2.0),
+                    max_depth_m=getattr(self, "camera_fallback_max_depth_m", 35.0),
+                    dedup_radius_m=getattr(self, "frustum_dedup_radius_m", 1.2),
                 )
-                obs.covariance = self._scaled_covariance(
-                    covariance=rec.covariance,
-                    health=health,
-                    projection_residual_mean_px=0.0,
-                    camera_lidar_abs_delta_ms=self.last_camera_lidar_abs_delta_ms,
-                    motion_age_ms=self.last_motion_age_ms,
-                    motion_comp_error_m=self.last_motion_comp_error_m,
-                )
-                obs.class_probs = [float(v) for v in rec.class_probs]
-                obs.quality_score = float(
-                    max(0.1, min(1.0, rec.confidence * img_q * 0.70))
-                )
-                obs.sensor_health = health
-                obs.source = f"{source}_frustum_recovered"
-                observations.append(obs)
-                if "frustum_recovered_observations" in self.counters:
-                    self.counters["frustum_recovered_observations"] += 1
-                if getattr(self, "enable_tracks", True):
-                    tracker_observations.append(self._to_tracker_observation(obs))
+                img_q = float(getattr(camera_msg, "image_quality", 1.0))
+                for rec in recovered_cones:
+                    rec_pos_lidar = self._transform_point_between_stamps(
+                        rec.position, from_stamp=cam_stamp_s, to_stamp=lidar_stamp_s
+                    )
+                    obs = ConeObservation()
+                    obs.header.stamp = lidar_msg.header.stamp
+                    obs.header.frame_id = frame_id
+                    obs.position = Point(
+                        x=float(rec_pos_lidar[0]),
+                        y=float(rec_pos_lidar[1]),
+                        z=float(rec_pos_lidar[2]),
+                    )
+                    obs.covariance = self._scaled_covariance(
+                        covariance=rec.covariance,
+                        health=health,
+                        projection_residual_mean_px=0.0,
+                        camera_lidar_abs_delta_ms=self.last_camera_lidar_abs_delta_ms,
+                        motion_age_ms=self.last_motion_age_ms,
+                        motion_comp_error_m=self.last_motion_comp_error_m,
+                    )
+                    obs.class_probs = [float(v) for v in rec.class_probs]
+                    obs.quality_score = float(
+                        max(0.1, min(1.0, rec.confidence * img_q * 0.70))
+                    )
+                    obs.sensor_health = health
+                    obs.source = f"{source}_frustum_recovered"
+                    observations.append(obs)
+                    if "frustum_recovered_observations" in self.counters:
+                        self.counters["frustum_recovered_observations"] += 1
+                    if getattr(self, "enable_tracks", True):
+                        tracker_observations.append(self._to_tracker_observation(obs))
 
         if (
             getattr(self, "enable_camera_fallback", True)
@@ -1342,8 +2074,77 @@ class FusionNode(Node):
             self.last_projection_residual_mean_px = float(
                 frame_projection_residual_sum / float(frame_projection_residual_samples)
             )
-        elif not self.enable_projection_semantics or camera_msg is None:
+        elif not self.enable_projection_semantics or not active_cam_present:
             self.last_projection_residual_mean_px = 0.0
+
+        # Debug 2D reprojection annotations & online calibration window collection
+        if (
+            getattr(self, "enable_debug_viz", False)
+            and camera_msg is not None
+            and detections
+            and cluster_positions
+        ):
+            clusters_at_cam_pos = [
+                self._transform_point_between_stamps(
+                    pos, from_stamp=lidar_stamp_s, to_stamp=cam_stamp_s
+                )
+                for pos in cluster_positions
+            ]
+            self._publish_reprojection_debug(
+                clusters_xyz=clusters_at_cam_pos,
+                detections=detections,
+                header=lidar_msg.header,
+            )
+
+        if (
+            getattr(self, "enable_online_calibration", False)
+            and source in ("live", "oosm_live")
+            and camera_msg is not None
+            and detections
+            and cluster_positions
+        ):
+            calib_window = getattr(self, "calibration_window", None)
+            if calib_window is None:
+                self.calibration_window = deque(
+                    maxlen=max(5, int(getattr(self, "online_calibration_window_frames", 30)))
+                )
+                calib_window = self.calibration_window
+            clusters_at_cam_pos = [
+                self._transform_point_between_stamps(
+                    pos, from_stamp=lidar_stamp_s, to_stamp=cam_stamp_s
+                )
+                for pos in cluster_positions
+            ]
+            vx_mps = float(getattr(self, "last_ego_speed_mps", 0.0))
+            vy_mps = 0.0
+            yaw_rate = 0.0
+            motion_buf = getattr(self, "motion_buffer", None)
+            if motion_buf:
+                _, last_odom = motion_buf[-1]
+                lin = last_odom.twist.twist.linear
+                ang = last_odom.twist.twist.angular
+                vx_mps = float(lin.x)
+                vy_mps = float(lin.y)
+                yaw_rate = float(ang.z)
+            calib_window.append(
+                CalibrationFrameSample(
+                    clusters_xyz=clusters_at_cam_pos,
+                    detections=detections,
+                    vx_mps=vx_mps,
+                    vy_mps=vy_mps,
+                    yaw_rate_radps=yaw_rate,
+                )
+            )
+            self._online_calib_frames_since_run = (
+                int(getattr(self, "_online_calib_frames_since_run", 0)) + 1
+            )
+            win_target = max(5, int(getattr(self, "online_calibration_window_frames", 30)))
+            if (
+                len(calib_window) >= min(win_target, calib_window.maxlen or win_target)
+                and self._online_calib_frames_since_run >= win_target
+            ):
+                self._online_calib_frames_since_run = 0
+                self.run_online_calibration()
 
         return observations, tracker_observations
 
@@ -1494,6 +2295,242 @@ class FusionNode(Node):
             self._publish_lost_track(track)
         for track in tracks:
             self._publish_track(track, header)
+
+        corridor: Optional[CorridorEstimate] = None
+        if getattr(self, "enable_corridor_output", False):
+            corridor = self.tracker.get_corridor_estimate(
+                horizon_m=float(getattr(self, "corridor_horizon_m", 20.0)),
+                step_m=float(getattr(self, "corridor_step_m", 1.0)),
+                ego_motion=ego_motion,
+            )
+            self.last_corridor_estimate = corridor
+            self._publish_corridor(corridor, header)
+
+        if getattr(self, "enable_debug_viz", False):
+            self._publish_debug_scene_markers(tracks, corridor, header, stamp)
+
+    def _publish_corridor(
+        self, corridor: Optional[CorridorEstimate], header: Any
+    ) -> None:
+        if corridor is None:
+            return
+        frame_id = getattr(self, "target_frame", "") or getattr(header, "frame_id", "base_link")
+        stamp = getattr(header, "stamp", None)
+
+        path_pub = getattr(self, "corridor_path_pub", None)
+        if path_pub is not None:
+            path_msg = Path()
+            if stamp is not None:
+                path_msg.header.stamp = stamp
+            path_msg.header.frame_id = frame_id
+            poses: List[PoseStamped] = []
+            for wx, wy, heading, _kappa in corridor.centerline_waypoints:
+                ps = PoseStamped()
+                if stamp is not None:
+                    ps.header.stamp = stamp
+                ps.header.frame_id = frame_id
+                ps.pose.position = Point(x=float(wx), y=float(wy), z=0.0)
+                half_yaw = 0.5 * float(heading)
+                ps.pose.orientation = Quaternion(
+                    x=0.0, y=0.0, z=math.sin(half_yaw), w=math.cos(half_yaw)
+                )
+                poses.append(ps)
+            path_msg.poses = poses
+            path_pub.publish(path_msg)
+
+        markers_pub = getattr(self, "corridor_markers_pub", None)
+        if markers_pub is not None:
+            marker_array = MarkerArray()
+            specs = [
+                (
+                    "corridor_left",
+                    0,
+                    [(float(x), float(y), 0.05) for x, y in corridor.left_boundary_xy],
+                    (0.12, 0.47, 0.96, 0.92),
+                    0.08,
+                ),
+                (
+                    "corridor_right",
+                    1,
+                    [(float(x), float(y), 0.05) for x, y in corridor.right_boundary_xy],
+                    (0.98, 0.85, 0.10, 0.92),
+                    0.08,
+                ),
+                (
+                    "corridor_centerline",
+                    2,
+                    [(float(wx), float(wy), 0.08) for wx, wy, _h, _k in corridor.centerline_waypoints],
+                    (0.15, 0.95, 0.35, 0.95),
+                    0.10,
+                ),
+            ]
+            for ns, mid, pts, rgba, width in specs:
+                if not pts:
+                    continue
+                m = Marker()
+                if stamp is not None:
+                    m.header.stamp = stamp
+                m.header.frame_id = frame_id
+                m.ns = ns
+                m.id = mid
+                m.type = Marker.LINE_STRIP
+                m.action = Marker.ADD
+                m.pose.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
+                m.scale.x = float(width)
+                m.color = ColorRGBA(r=rgba[0], g=rgba[1], b=rgba[2], a=rgba[3])
+                m.points = [Point(x=px, y=py, z=pz) for px, py, pz in pts]
+                marker_array.markers.append(m)
+            markers_pub.publish(marker_array)
+
+        if "corridor_published" in self.counters:
+            self.counters["corridor_published"] += 1
+
+    def _publish_debug_scene_markers(
+        self,
+        tracks: List[TrackEstimate],
+        corridor: Optional[CorridorEstimate],
+        header: Any,
+        stamp: float,
+    ) -> None:
+        frame_id = getattr(self, "target_frame", "") or getattr(header, "frame_id", "base_link")
+        msg_stamp = getattr(header, "stamp", None)
+        descriptors = build_scene_marker_descriptors(
+            tracks=tracks,
+            corridor=corridor,
+            frame_id=frame_id,
+            stamp_sec=stamp,
+            confirmed_only=False,
+        )
+        self.last_debug_markers = descriptors
+        markers_pub = getattr(self, "debug_markers_pub", None)
+        if markers_pub is not None:
+            type_map = {
+                "CYLINDER": Marker.CYLINDER,
+                "ELLIPSE": Marker.CYLINDER,
+                "TEXT_VIEW_FACING": Marker.TEXT_VIEW_FACING,
+                "LINE_STRIP": Marker.LINE_STRIP,
+            }
+            marker_array = MarkerArray()
+            for desc in descriptors:
+                m = Marker()
+                if msg_stamp is not None:
+                    m.header.stamp = msg_stamp
+                m.header.frame_id = desc.frame_id or frame_id
+                m.ns = desc.ns
+                m.id = int(desc.marker_id)
+                m.type = type_map.get(desc.marker_type, Marker.CYLINDER)
+                m.action = Marker.ADD
+                m.pose.position = Point(x=float(desc.x), y=float(desc.y), z=float(desc.z))
+                half_yaw = 0.5 * float(desc.yaw_rad)
+                m.pose.orientation = Quaternion(
+                    x=0.0, y=0.0, z=math.sin(half_yaw), w=math.cos(half_yaw)
+                )
+                m.scale.x = float(desc.scale_x)
+                m.scale.y = float(desc.scale_y)
+                m.scale.z = float(desc.scale_z)
+                m.color = ColorRGBA(
+                    r=float(desc.rgba[0]),
+                    g=float(desc.rgba[1]),
+                    b=float(desc.rgba[2]),
+                    a=float(desc.rgba[3]),
+                )
+                m.text = str(desc.text)
+                if desc.points_xyz:
+                    m.points = [
+                        Point(x=float(px), y=float(py), z=float(pz))
+                        for px, py, pz in desc.points_xyz
+                    ]
+                marker_array.markers.append(m)
+            markers_pub.publish(marker_array)
+        if "debug_markers_published" in self.counters:
+            self.counters["debug_markers_published"] += 1
+
+    def _publish_reprojection_debug(
+        self,
+        clusters_xyz: List[Tuple[float, float, float]],
+        detections: List[Any],
+        header: Any,
+    ) -> None:
+        annotations = build_reprojection_debug_annotations(
+            clusters_xyz=clusters_xyz,
+            detections=detections,
+            intrinsics=self.projector.intrinsics,
+            extrinsics=self.projector.extrinsics,
+        )
+        self.last_reprojection_annotations = annotations
+        reproj_pub = getattr(self, "debug_reprojection_pub", None)
+        if reproj_pub is not None:
+            payload = [
+                {
+                    "cluster_index": int(a.cluster_index),
+                    "u_proj": round(float(a.u_proj), 2),
+                    "v_proj": round(float(a.v_proj), 2),
+                    "depth_m": round(float(a.depth_m), 3),
+                    "matched_detection_index": int(a.matched_detection_index),
+                    "residual_px": round(float(a.residual_px), 2),
+                    "class_label": str(a.class_label),
+                }
+                for a in annotations
+            ]
+            reproj_pub.publish(
+                String(
+                    data=json.dumps(
+                        {
+                            "frame_id": getattr(header, "frame_id", ""),
+                            "annotations": payload,
+                        }
+                    )
+                )
+            )
+
+    def run_online_calibration(
+        self, apply_extrinsics: Optional[bool] = None
+    ) -> Optional[Dict[str, Any]]:
+        samples = list(getattr(self, "calibration_window", []))
+        if not samples:
+            return None
+        intrinsics = self.projector.intrinsics
+        extrinsics = self.projector.extrinsics
+        ext_res = calibrate_lidar_to_camera_extrinsics(samples, intrinsics, extrinsics)
+        sync_res = calibrate_temporal_sync_offset(samples, intrinsics, extrinsics)
+        if "online_calib_runs" in self.counters:
+            self.counters["online_calib_runs"] += 1
+
+        min_pairs = max(1, int(getattr(self, "online_calibration_min_pairs", 12)))
+        should_apply = bool(
+            getattr(self, "online_calibration_apply_extrinsics", False)
+            if apply_extrinsics is None
+            else apply_extrinsics
+        )
+        applied = False
+        if (
+            should_apply
+            and ext_res.matched_pairs >= min_pairs
+            and ext_res.final_rmse_px <= ext_res.initial_rmse_px + 1e-6
+        ):
+            self.projector.extrinsics = ext_res.calibrated_extrinsics
+            profiles = getattr(self, "camera_profiles", None)
+            if profiles and "primary" in profiles:
+                profiles["primary"].projector.extrinsics = ext_res.calibrated_extrinsics
+            applied = True
+            if "online_calib_applied" in self.counters:
+                self.counters["online_calib_applied"] += 1
+
+        report = {
+            "matched_pairs": int(ext_res.matched_pairs),
+            "initial_rmse_px": float(ext_res.initial_rmse_px),
+            "final_rmse_px": float(ext_res.final_rmse_px),
+            "delta_roll_rad": float(ext_res.delta_roll_rad),
+            "delta_pitch_rad": float(ext_res.delta_pitch_rad),
+            "delta_yaw_rad": float(ext_res.delta_yaw_rad),
+            "estimated_time_offset_sec": float(sync_res.estimated_time_offset_sec),
+            "zero_offset_rmse_px": float(sync_res.zero_offset_rmse_px),
+            "optimal_offset_rmse_px": float(sync_res.optimal_offset_rmse_px),
+            "evaluated_frames": int(sync_res.evaluated_frames),
+            "applied": applied,
+        }
+        self.last_online_calibration_report = report
+        return report
 
     def _publish_track(self, track: TrackEstimate, header: Any) -> None:
         msg = ConeTrack()
@@ -1811,8 +2848,66 @@ class FusionNode(Node):
             return SENSOR_HEALTH_DEGRADED
         return SENSOR_HEALTH_OK
 
+    def _on_camera_info(self, msg: Any, camera_id: str = "primary") -> None:
+        if not getattr(self, "enable_camera_info_intrinsics", True):
+            return
+        k_mat = list(getattr(msg, "k", None) or getattr(msg, "K", []) or [])
+        p_mat = list(getattr(msg, "p", None) or getattr(msg, "P", []) or [])
+        d_vec = list(getattr(msg, "d", None) or getattr(msg, "D", []) or [])
+        width = int(getattr(msg, "width", 0) or 0)
+        height = int(getattr(msg, "height", 0) or 0)
+
+        fx = fy = cx = cy = 0.0
+        if len(k_mat) >= 9 and float(k_mat[0]) > 0.0 and float(k_mat[4]) > 0.0:
+            fx = float(k_mat[0])
+            cx = float(k_mat[2])
+            fy = float(k_mat[4])
+            cy = float(k_mat[5])
+        elif len(p_mat) >= 12 and float(p_mat[0]) > 0.0 and float(p_mat[5]) > 0.0:
+            fx = float(p_mat[0])
+            cx = float(p_mat[2])
+            fy = float(p_mat[5])
+            cy = float(p_mat[6])
+        if fx <= 0.0 or fy <= 0.0 or width <= 0 or height <= 0:
+            return
+
+        k1 = float(d_vec[0]) if len(d_vec) > 0 else 0.0
+        k2 = float(d_vec[1]) if len(d_vec) > 1 else 0.0
+        p1 = float(d_vec[2]) if len(d_vec) > 2 else 0.0
+        p2 = float(d_vec[3]) if len(d_vec) > 3 else 0.0
+        k3 = float(d_vec[4]) if len(d_vec) > 4 else 0.0
+
+        new_intr = CameraIntrinsics(
+            fx=fx,
+            fy=fy,
+            cx=cx,
+            cy=cy,
+            width=width,
+            height=height,
+            k1=k1,
+            k2=k2,
+            p1=p1,
+            p2=p2,
+            k3=k3,
+        )
+        profiles = getattr(self, "camera_profiles", None)
+        if profiles and camera_id in profiles:
+            profiles[camera_id].projector.intrinsics = new_intr
+        if camera_id == "primary" and getattr(self, "projector", None) is not None:
+            self.projector.intrinsics = new_intr
+
+        counters = getattr(self, "counters", None)
+        if isinstance(counters, dict):
+            counters["camera_info_updates"] = int(counters.get("camera_info_updates", 0)) + 1
+        last_map = getattr(self, "last_camera_info_cameras", None)
+        if isinstance(last_map, dict):
+            last_map[camera_id] = (fx, fy, cx, cy, width, height)
+
     def _refresh_projector_extrinsics(
-        self, lidar_msg: LidarConeClusters, camera_msg: Optional[CameraConeDetections]
+        self,
+        lidar_msg: LidarConeClusters,
+        camera_msg: Optional[CameraConeDetections],
+        camera_msgs_by_cam: Optional[Dict[str, CameraConeDetections]] = None,
     ) -> None:
         if not self.use_tf_extrinsics or self.tf_buffer is None:
             self.last_extrinsics_source = "params"
@@ -1874,6 +2969,33 @@ class FusionNode(Node):
             self.last_tf_age_ms = max(0.0, (lidar_stamp - tf_stamp) * 1000.0)
         if self.last_tf_age_ms >= self.tf_extrinsics_warn_age_ms:
             self.counters["tf_extrinsics_stale"] += 1
+
+        # Refresh any secondary / N-camera profiles that opt in to dynamic TF extrinsics
+        profiles = getattr(self, "camera_profiles", None) or {}
+        for cam_id, prof in profiles.items():
+            if cam_id == "primary" or not getattr(prof, "use_tf_extrinsics", False):
+                continue
+            aux_cam_frame = str(getattr(prof, "frame_id", "")).strip()
+            if not aux_cam_frame and camera_msgs_by_cam and cam_id in camera_msgs_by_cam:
+                aux_cam_frame = str(getattr(camera_msgs_by_cam[cam_id].header, "frame_id", "")).strip()
+            if not aux_cam_frame:
+                continue
+            try:
+                aux_tf = self.tf_buffer.lookup_transform(
+                    aux_cam_frame, lidar_frame, source_time, timeout=timeout
+                )
+            except TransformException:
+                self.counters["tf_lookup_fail"] += 1
+                continue
+            at = aux_tf.transform.translation
+            aq = aux_tf.transform.rotation
+            prof.projector.extrinsics = LidarToCameraExtrinsics(
+                rotation=self._quat_to_rotation_matrix(
+                    float(aq.x), float(aq.y), float(aq.z), float(aq.w)
+                ),
+                translation=(float(at.x), float(at.y), float(at.z)),
+            )
+            self.counters["tf_lookup_success"] += 1
 
     @staticmethod
     def _quat_to_rotation_matrix(
@@ -2075,6 +3197,12 @@ class FusionNode(Node):
             ("stage_ms_max_replay_total", f"{self.max_stage_ms['replay_total']:.3f}"),
             ("stage_ms_max_cycle_total", f"{self.max_stage_ms['cycle_total']:.3f}"),
             ("last_health", str(self.last_health)),
+            ("registered_cameras", str(len(getattr(self, "camera_profiles", {"primary": None})))),
+            ("registered_lidars", str(len(getattr(self, "lidar_profiles", {"primary": None})))),
+            ("enable_corridor_output", str(getattr(self, "enable_corridor_output", False)).lower()),
+            ("enable_debug_viz", str(getattr(self, "enable_debug_viz", False)).lower()),
+            ("enable_online_calibration", str(getattr(self, "enable_online_calibration", False)).lower()),
+            ("online_calib_window_size", str(len(getattr(self, "calibration_window", ())))),
             (
                 "replay_anchor_stamp",
                 "none" if self.replay_anchor_stamp is None else f"{self.replay_anchor_stamp:.6f}",

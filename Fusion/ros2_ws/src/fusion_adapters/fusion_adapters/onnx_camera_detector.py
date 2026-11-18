@@ -12,7 +12,7 @@ from __future__ import annotations
 import ast
 import os
 import time
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 try:
     import numpy as np
@@ -74,6 +74,56 @@ def _parse_imgsz(raw: str) -> Optional[Tuple[int, int]]:
         return None
 
 
+def build_ort_provider_config(
+    backend: str = "auto",
+    available_providers: Optional[Sequence[str]] = None,
+    enable_fp16: bool = True,
+    enable_int8: bool = False,
+    enable_dla: bool = False,
+    dla_core: int = 0,
+    engine_cache_dir: str = "/tmp/trt_cache",
+) -> List[Union[str, Tuple[str, Dict[str, Any]]]]:
+    """Build ONNX Runtime execution provider chain for CPU, CUDA, TensorRT, or Jetson DLA."""
+    avail = list(available_providers) if available_providers is not None else (
+        list(ort.get_available_providers()) if ort is not None else ["CPUExecutionProvider"]
+    )
+    backend_norm = str(backend or "auto").strip().lower()
+
+    trt_options: Dict[str, Any] = {
+        "trt_fp16_enable": bool(enable_fp16),
+        "trt_int8_enable": bool(enable_int8),
+        "trt_engine_cache_enable": True,
+        "trt_engine_cache_path": str(engine_cache_dir or "/tmp/trt_cache"),
+    }
+    if enable_dla:
+        trt_options["trt_dla_enable"] = True
+        trt_options["trt_dla_core"] = max(0, int(dla_core))
+
+    if backend_norm == "cpu":
+        ordered: List[Union[str, Tuple[str, Dict[str, Any]]]] = ["CPUExecutionProvider"]
+    elif backend_norm == "cuda":
+        ordered = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    elif backend_norm in ("tensorrt", "dla"):
+        ordered = [
+            ("TensorrtExecutionProvider", trt_options),
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+    else:  # "auto"
+        ordered = [
+            ("TensorrtExecutionProvider", trt_options),
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ]
+
+    chosen: List[Union[str, Tuple[str, Dict[str, Any]]]] = []
+    for entry in ordered:
+        name = entry[0] if isinstance(entry, tuple) else entry
+        if name in avail:
+            chosen.append(entry)
+    return chosen or ["CPUExecutionProvider"]
+
+
 class OnnxConeDetector:
     """Letterbox -> ONNX Runtime -> decode -> de-letterbox, no PyTorch/Ultralytics needed."""
 
@@ -81,10 +131,16 @@ class OnnxConeDetector:
         self,
         model_path: str = "",
         conf_threshold: float = 0.25,
-        providers: Optional[Sequence[str]] = None,
+        providers: Optional[Sequence[Union[str, Tuple[str, Dict[str, Any]]]]] = None,
         label_map: Optional[Dict[str, int]] = None,
         intra_op_threads: int = 0,
         auto_rotate: bool = False,
+        backend: str = "auto",
+        enable_fp16: bool = True,
+        enable_int8: bool = False,
+        enable_dla: bool = False,
+        dla_core: int = 0,
+        engine_cache_dir: str = "/tmp/trt_cache",
     ) -> None:
         if ort is None or np is None or cv2 is None:
             raise RuntimeError("OnnxConeDetector requires numpy, opencv-python and onnxruntime")
@@ -93,8 +149,28 @@ class OnnxConeDetector:
         if intra_op_threads > 0:
             so.intra_op_num_threads = int(intra_op_threads)
         avail = ort.get_available_providers()
-        chosen = [p for p in (providers or ("CUDAExecutionProvider", "CPUExecutionProvider")) if p in avail]
-        self.session = ort.InferenceSession(path, sess_options=so, providers=chosen or ["CPUExecutionProvider"])
+        if providers is not None:
+            chosen: List[Any] = [
+                p for p in providers if (p[0] if isinstance(p, tuple) else p) in avail
+            ] or ["CPUExecutionProvider"]
+        else:
+            chosen = build_ort_provider_config(
+                backend=backend,
+                available_providers=avail,
+                enable_fp16=enable_fp16,
+                enable_int8=enable_int8,
+                enable_dla=enable_dla,
+                dla_core=dla_core,
+                engine_cache_dir=engine_cache_dir,
+            )
+        try:
+            self.session = ort.InferenceSession(path, sess_options=so, providers=chosen)
+        except Exception:
+            self.session = ort.InferenceSession(path, sess_options=so, providers=["CPUExecutionProvider"])
+        self.backend = str(backend or "auto")
+        self.enable_dla = bool(enable_dla)
+        self.dla_core = max(0, int(dla_core))
+        self.active_providers: List[str] = list(self.session.get_providers())
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name
         self.in_h, self.in_w = int(inp.shape[2]), int(inp.shape[3])
@@ -174,6 +250,45 @@ class OnnxConeDetector:
         return results
 
 
+class TensorRTConeEngine(OnnxConeDetector):
+    """Jetson Orin AGX TensorRT / DLA accelerated cone detector with safe CPU fallback."""
+
+    def __init__(
+        self,
+        model_path: str = "",
+        conf_threshold: float = 0.25,
+        label_map: Optional[Dict[str, int]] = None,
+        intra_op_threads: int = 0,
+        auto_rotate: bool = False,
+        enable_fp16: bool = True,
+        enable_int8: bool = False,
+        enable_dla: bool = False,
+        dla_core: int = 0,
+        engine_cache_dir: str = "/tmp/trt_cache",
+    ) -> None:
+        super().__init__(
+            model_path=model_path,
+            conf_threshold=conf_threshold,
+            label_map=label_map,
+            intra_op_threads=intra_op_threads,
+            auto_rotate=auto_rotate,
+            backend="tensorrt",
+            enable_fp16=enable_fp16,
+            enable_int8=enable_int8,
+            enable_dla=enable_dla,
+            dla_core=dla_core,
+            engine_cache_dir=engine_cache_dir,
+        )
+
+    @property
+    def is_tensorrt_active(self) -> bool:
+        return "TensorrtExecutionProvider" in self.active_providers
+
+    @property
+    def is_dla_enabled(self) -> bool:
+        return self.enable_dla and self.is_tensorrt_active
+
+
 class OnnxCameraDetectorNode(Node):
     """ROS 2 node: image topic -> CameraConeDetections (drop-in replacement for any detector)."""
 
@@ -187,11 +302,23 @@ class OnnxCameraDetectorNode(Node):
         self.declare_parameter("auto_rotate", False)
         self.declare_parameter("intra_op_threads", 0)
         self.declare_parameter("image_quality", 1.0)
+        self.declare_parameter("backend", "auto")
+        self.declare_parameter("enable_fp16", True)
+        self.declare_parameter("enable_int8", False)
+        self.declare_parameter("enable_dla", False)
+        self.declare_parameter("dla_core", 0)
+        self.declare_parameter("engine_cache_dir", "/tmp/trt_cache")
         self.detector = OnnxConeDetector(
             model_path=str(self.get_parameter("model_path").value),
             conf_threshold=float(self.get_parameter("conf_threshold").value),
             auto_rotate=bool(self.get_parameter("auto_rotate").value),
             intra_op_threads=int(self.get_parameter("intra_op_threads").value),
+            backend=str(self.get_parameter("backend").value),
+            enable_fp16=bool(self.get_parameter("enable_fp16").value),
+            enable_int8=bool(self.get_parameter("enable_int8").value),
+            enable_dla=bool(self.get_parameter("enable_dla").value),
+            dla_core=int(self.get_parameter("dla_core").value),
+            engine_cache_dir=str(self.get_parameter("engine_cache_dir").value),
         )
         self.image_quality = float(self.get_parameter("image_quality").value)
         topic = str(self.get_parameter("image_topic").value)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -105,6 +106,157 @@ class ClusterDescriptorC(ctypes.Structure):
     ]
 
 
+class CameraIntrinsicsC(ctypes.Structure):
+    _fields_ = [
+        ("fx", ctypes.c_double),
+        ("fy", ctypes.c_double),
+        ("cx", ctypes.c_double),
+        ("cy", ctypes.c_double),
+        ("width", ctypes.c_int32),
+        ("height", ctypes.c_int32),
+        ("k1", ctypes.c_double),
+        ("k2", ctypes.c_double),
+        ("p1", ctypes.c_double),
+        ("p2", ctypes.c_double),
+        ("k3", ctypes.c_double),
+    ]
+
+
+class ExtrinsicsC(ctypes.Structure):
+    _fields_ = [
+        ("r", ctypes.c_double * 9),
+        ("t", ctypes.c_double * 3),
+        ("min_depth_m", ctypes.c_double),
+        ("max_depth_m", ctypes.c_double),
+        ("sample_radius_scale", ctypes.c_double),
+        ("min_semantic_weight", ctypes.c_double),
+        ("no_match_semantic_weight", ctypes.c_double),
+        ("soft_likelihood_enabled", ctypes.c_int32),
+        ("soft_likelihood_sigma_scale", ctypes.c_double),
+        ("soft_likelihood_min_value", ctypes.c_double),
+        ("soft_likelihood_outside_ratio", ctypes.c_double),
+        ("enable_frustum_hull_sampling", ctypes.c_int32),
+    ]
+
+
+class ClusterInputC(ctypes.Structure):
+    _fields_ = [
+        ("cx", ctypes.c_double),
+        ("cy", ctypes.c_double),
+        ("cz", ctypes.c_double),
+        ("cov_xx", ctypes.c_double),
+        ("cov_yy", ctypes.c_double),
+        ("cov_zz", ctypes.c_double),
+    ]
+
+
+class Detection2DC(ctypes.Structure):
+    _fields_ = [
+        ("xmin", ctypes.c_double),
+        ("ymin", ctypes.c_double),
+        ("xmax", ctypes.c_double),
+        ("ymax", ctypes.c_double),
+        ("class_probs", ctypes.c_double * 4),
+        ("confidence", ctypes.c_double),
+    ]
+
+
+class ClusterSemanticC(ctypes.Structure):
+    _fields_ = [
+        ("class_probs", ctypes.c_double * 4),
+        ("semantic_weight", ctypes.c_double),
+        ("projected_samples", ctypes.c_int32),
+        ("matched_samples", ctypes.c_int32),
+        ("matched_weight_sum", ctypes.c_double),
+        ("best_confidence", ctypes.c_double),
+        ("residual_samples", ctypes.c_int32),
+        ("residual_sum_px", ctypes.c_double),
+        ("residual_max_px", ctypes.c_double),
+        ("matched_detection_idx", ctypes.c_int32),
+    ]
+
+
+class TrackerConfigC(ctypes.Structure):
+    _fields_ = [
+        ("mahalanobis_gate", ctypes.c_double),
+        ("semantic_min_overlap", ctypes.c_double),
+        ("semantic_cost_weight", ctypes.c_double),
+        ("process_noise_accel", ctypes.c_double),
+        ("min_meas_var", ctypes.c_double),
+        ("confirm_hits", ctypes.c_int32),
+        ("max_missed", ctypes.c_int32),
+        ("class_update_alpha", ctypes.c_double),
+        ("max_predict_dt", ctypes.c_double),
+        ("motion_model_landmark", ctypes.c_int32),
+        ("assignment_hungarian", ctypes.c_int32),
+        ("semantic_dirichlet", ctypes.c_int32),
+        ("dirichlet_prior_strength", ctypes.c_double),
+        ("dirichlet_evidence_scale", ctypes.c_double),
+        ("dirichlet_max_concentration", ctypes.c_double),
+        ("landmark_process_noise_pos", ctypes.c_double),
+        ("odom_vx_std", ctypes.c_double),
+        ("odom_vy_std", ctypes.c_double),
+        ("odom_wz_std", ctypes.c_double),
+    ]
+
+
+class Observation2DC(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_double),
+        ("y", ctypes.c_double),
+        ("z", ctypes.c_double),
+        ("cov_xx", ctypes.c_double),
+        ("cov_xy", ctypes.c_double),
+        ("cov_yy", ctypes.c_double),
+        ("z_var", ctypes.c_double),
+        ("class_probs", ctypes.c_double * 4),
+        ("quality", ctypes.c_double),
+    ]
+
+
+class EgoMotionC(ctypes.Structure):
+    _fields_ = [
+        ("has_motion", ctypes.c_int32),
+        ("vx", ctypes.c_double),
+        ("vy", ctypes.c_double),
+        ("wz", ctypes.c_double),
+        ("dt", ctypes.c_double),
+        ("has_disp", ctypes.c_int32),
+        ("dx", ctypes.c_double),
+        ("dy", ctypes.c_double),
+        ("dyaw", ctypes.c_double),
+    ]
+
+
+class TrackEstimateC(ctypes.Structure):
+    _fields_ = [
+        ("track_id", ctypes.c_int32),
+        ("state", ctypes.c_double * 4),
+        ("covariance", ctypes.c_double * 16),
+        ("z", ctypes.c_double),
+        ("z_var", ctypes.c_double),
+        ("class_probs", ctypes.c_double * 4),
+        ("hits", ctypes.c_int32),
+        ("misses", ctypes.c_int32),
+        ("quality", ctypes.c_double),
+        ("status", ctypes.c_int32),
+        ("first_stamp", ctypes.c_double),
+        ("last_stamp", ctypes.c_double),
+        ("semantic_certainty", ctypes.c_double),
+    ]
+
+
+class TrackerStepStatsC(ctypes.Structure):
+    _fields_ = [
+        ("tracks_created", ctypes.c_int32),
+        ("tracks_deleted", ctypes.c_int32),
+        ("assoc_candidates", ctypes.c_int32),
+        ("assoc_matches", ctypes.c_int32),
+        ("assoc_rejects", ctypes.c_int32),
+        ("n_lost_tracks", ctypes.c_int32),
+    ]
+
+
 _LOADED_LIB: Optional[ctypes.CDLL] = None
 _TRIED_LOAD = False
 
@@ -122,6 +274,25 @@ def get_cpp_kernels() -> Optional[ctypes.CDLL]:
         src_root / "fusion_core_cpp" / "bin" / "libfusion_fast_kernels.so",
         src_root / "fusion_core_cpp" / "bin" / "libfusion_fast_kernels.dylib",
     ]
+    # Also resolve installed ROS 2 colcon libraries (`install/fusion_core_cpp/lib` or `install/lib`).
+    for env_var in ("AMENT_PREFIX_PATH", "COLCON_PREFIX_PATH", "LD_LIBRARY_PATH"):
+        raw = os.environ.get(env_var, "")
+        for entry in raw.split(os.pathsep):
+            if not entry:
+                continue
+            p = Path(entry)
+            candidates.extend(
+                [
+                    p / "lib" / "libfusion_fast_kernels.so",
+                    p / "libfusion_fast_kernels.so",
+                    p / "fusion_core_cpp" / "lib" / "libfusion_fast_kernels.so",
+                ]
+            )
+    resolved_file = Path(__file__).resolve()
+    for parent in resolved_file.parents:
+        if (parent / "fusion_core_cpp" / "lib" / "libfusion_fast_kernels.so").is_file():
+            candidates.append(parent / "fusion_core_cpp" / "lib" / "libfusion_fast_kernels.so")
+            break
     for path in candidates:
         if path.is_file():
             try:
@@ -164,6 +335,49 @@ def get_cpp_kernels() -> Optional[ctypes.CDLL]:
                     ctypes.c_int32,
                 ]
                 lib.cpp_cluster_and_build.restype = ctypes.c_int32
+
+                lib.cpp_estimate_batch_semantics.argtypes = [
+                    ctypes.c_int32,
+                    ctypes.POINTER(ClusterInputC),
+                    ctypes.c_int32,
+                    ctypes.POINTER(Detection2DC),
+                    ctypes.POINTER(CameraIntrinsicsC),
+                    ctypes.POINTER(ExtrinsicsC),
+                    ctypes.POINTER(ctypes.c_double),
+                    ctypes.POINTER(ClusterSemanticC),
+                ]
+                lib.cpp_estimate_batch_semantics.restype = ctypes.c_int32
+
+                lib.cpp_tracker_create.argtypes = [ctypes.POINTER(TrackerConfigC)]
+                lib.cpp_tracker_create.restype = ctypes.c_void_p
+
+                lib.cpp_tracker_destroy.argtypes = [ctypes.c_void_p]
+                lib.cpp_tracker_destroy.restype = None
+
+                lib.cpp_tracker_reset.argtypes = [ctypes.c_void_p]
+                lib.cpp_tracker_reset.restype = None
+
+                lib.cpp_tracker_step.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.c_double,
+                    ctypes.POINTER(EgoMotionC),
+                    ctypes.c_int32,
+                    ctypes.POINTER(Observation2DC),
+                    ctypes.POINTER(TrackEstimateC),
+                    ctypes.c_int32,
+                    ctypes.POINTER(TrackEstimateC),
+                    ctypes.c_int32,
+                    ctypes.POINTER(TrackerStepStatsC),
+                ]
+                lib.cpp_tracker_step.restype = ctypes.c_int32
+
+                lib.cpp_tracker_get_tracks.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.POINTER(TrackEstimateC),
+                    ctypes.c_int32,
+                ]
+                lib.cpp_tracker_get_tracks.restype = ctypes.c_int32
+
                 _LOADED_LIB = lib
                 return _LOADED_LIB
             except Exception:

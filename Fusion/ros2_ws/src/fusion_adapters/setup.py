@@ -28,6 +28,7 @@ setup(
             "camera_detection_adapter = fusion_adapters.camera_detection_adapter:main",
             "ouster_lidar_adapter = fusion_adapters.ouster_lidar_adapter:main",
             "onnx_camera_detector = fusion_adapters.onnx_camera_detector:main",
+            "trt_camera_detector = fusion_adapters.onnx_camera_detector:main",
             "lidar_cluster_adapter = fusion_adapters.lidar_cluster_adapter:main",
         ],
     },

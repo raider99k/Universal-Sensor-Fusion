@@ -499,3 +499,111 @@ def format_calibrated_ros2_yaml(
         if sync_result is not None:
             lines.append(f"    camera_time_offset_sec: {sync_result.estimated_time_offset_sec:.5f}")
     return "\n".join(lines) + "\n"
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(
+        description="Trackside Auto-Calibrator for LiDAR ground plane, camera extrinsics, and temporal sync."
+    )
+    parser.add_argument("--samples-json", default="", help="Path to JSON calibration samples file.")
+    parser.add_argument("--bag-path", default="", help="Path to ROS 2 bag (.db3/.mcap) directory or file.")
+    parser.add_argument("--max-frames", type=int, default=40)
+    parser.add_argument("--camera-fx", type=float, default=700.0)
+    parser.add_argument("--camera-fy", type=float, default=700.0)
+    parser.add_argument("--camera-cx", type=float, default=640.0)
+    parser.add_argument("--camera-cy", type=float, default=360.0)
+    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--output-yaml", default="", help="Optional output path for ROS 2 YAML.")
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    intrinsics = CameraIntrinsics(
+        fx=args.camera_fx,
+        fy=args.camera_fy,
+        cx=args.camera_cx,
+        cy=args.camera_cy,
+        width=args.width,
+        height=args.height,
+    )
+    extrinsics = LidarToCameraExtrinsics.from_rpy_translation(
+        tx=0.0, ty=0.0, tz=0.0, roll=-math.pi, pitch=-0.5 * math.pi, yaw=-0.5 * math.pi
+    )
+    points_xyz: List[Tuple[float, float, float]] = []
+    frames: List[CalibrationFrameSample] = []
+
+    if args.samples_json:
+        with open(args.samples_json, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if "intrinsics" in payload:
+            ic = payload["intrinsics"]
+            intrinsics = CameraIntrinsics(**ic)
+        if "extrinsics" in payload:
+            ec = payload["extrinsics"]
+            extrinsics = LidarToCameraExtrinsics.from_rpy_translation(**ec)
+        points_xyz = [tuple(float(v) for v in p[:3]) for p in payload.get("points_xyz", [])]
+        for fr in payload.get("frames", []):
+            dets = [DetectionRecord(**d) for d in fr.get("detections", [])]
+            clusters = [tuple(float(v) for v in c[:3]) for c in fr.get("clusters_xyz", [])]
+            frames.append(
+                CalibrationFrameSample(
+                    clusters_xyz=clusters,
+                    detections=dets,
+                    vx_mps=float(fr.get("vx_mps", 0.0)),
+                    vy_mps=float(fr.get("vy_mps", 0.0)),
+                    yaw_rate_radps=float(fr.get("yaw_rate_radps", 0.0)),
+                )
+            )
+    elif args.bag_path:
+        from fusion_core.fsd_rosbag_benchmark import load_frames_from_rosbag
+
+        bag_frames, bag_intr, bag_ext = load_frames_from_rosbag(
+            bag_path=args.bag_path, max_frames=args.max_frames
+        )
+        intrinsics = bag_intr
+        extrinsics = bag_ext
+        for bf in bag_frames:
+            if not points_xyz and bf.raw_points_ego:
+                points_xyz = list(bf.raw_points_ego)
+            frames.append(
+                CalibrationFrameSample(
+                    clusters_xyz=list(bf.raw_points_ego[:256]),
+                    detections=list(bf.detections_2d),
+                    vx_mps=float(bf.vx),
+                    vy_mps=float(bf.vy),
+                    yaw_rate_radps=float(bf.wz),
+                )
+            )
+
+    ground_res = calibrate_lidar_ground_plane(points_xyz) if points_xyz else None
+    ext_res = (
+        calibrate_lidar_to_camera_extrinsics(frames, intrinsics, extrinsics)
+        if frames
+        else None
+    )
+    sync_res = (
+        calibrate_temporal_sync_offset(
+            frames,
+            intrinsics,
+            ext_res.calibrated_extrinsics if ext_res is not None else extrinsics,
+        )
+        if frames
+        else None
+    )
+
+    yaml_text = format_calibrated_ros2_yaml(
+        ground_result=ground_res,
+        extrinsic_result=ext_res,
+        sync_result=sync_res,
+    )
+    if args.output_yaml:
+        with open(args.output_yaml, "w", encoding="utf-8") as f:
+            f.write(yaml_text)
+    print(yaml_text, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

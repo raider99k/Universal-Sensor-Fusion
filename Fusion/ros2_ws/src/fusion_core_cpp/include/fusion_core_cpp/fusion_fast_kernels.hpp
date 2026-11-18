@@ -104,6 +104,137 @@ struct ClusterDescriptorC {
     int32_t point_count;
 };
 
+struct CameraIntrinsicsC {
+    double fx;
+    double fy;
+    double cx;
+    double cy;
+    int32_t width;
+    int32_t height;
+    double k1;
+    double k2;
+    double p1;
+    double p2;
+    double k3;
+};
+
+struct ExtrinsicsC {
+    double r[9];
+    double t[3];
+    double min_depth_m;
+    double max_depth_m;
+    double sample_radius_scale;
+    double min_semantic_weight;
+    double no_match_semantic_weight;
+    int32_t soft_likelihood_enabled;
+    double soft_likelihood_sigma_scale;
+    double soft_likelihood_min_value;
+    double soft_likelihood_outside_ratio;
+    int32_t enable_frustum_hull_sampling;
+};
+
+struct ClusterInputC {
+    double cx;
+    double cy;
+    double cz;
+    double cov_xx;
+    double cov_yy;
+    double cov_zz;
+};
+
+struct Detection2DC {
+    double xmin;
+    double ymin;
+    double xmax;
+    double ymax;
+    double class_probs[4];
+    double confidence;
+};
+
+struct ClusterSemanticC {
+    double class_probs[4];
+    double semantic_weight;
+    int32_t projected_samples;
+    int32_t matched_samples;
+    double matched_weight_sum;
+    double best_confidence;
+    int32_t residual_samples;
+    double residual_sum_px;
+    double residual_max_px;
+    int32_t matched_detection_idx;
+};
+
+struct TrackerConfigC {
+    double mahalanobis_gate;
+    double semantic_min_overlap;
+    double semantic_cost_weight;
+    double process_noise_accel;
+    double min_meas_var;
+    int32_t confirm_hits;
+    int32_t max_missed;
+    double class_update_alpha;
+    double max_predict_dt;
+    int32_t motion_model_landmark;
+    int32_t assignment_hungarian;
+    int32_t semantic_dirichlet;
+    double dirichlet_prior_strength;
+    double dirichlet_evidence_scale;
+    double dirichlet_max_concentration;
+    double landmark_process_noise_pos;
+    double odom_vx_std;
+    double odom_vy_std;
+    double odom_wz_std;
+};
+
+struct Observation2DC {
+    double x;
+    double y;
+    double z;
+    double cov_xx;
+    double cov_xy;
+    double cov_yy;
+    double z_var;
+    double class_probs[4];
+    double quality;
+};
+
+struct EgoMotionC {
+    int32_t has_motion;
+    double vx;
+    double vy;
+    double wz;
+    double dt;
+    int32_t has_disp;
+    double dx;
+    double dy;
+    double dyaw;
+};
+
+struct TrackEstimateC {
+    int32_t track_id;
+    double state[4];
+    double covariance[16];
+    double z;
+    double z_var;
+    double class_probs[4];
+    int32_t hits;
+    int32_t misses;
+    double quality;
+    int32_t status;
+    double first_stamp;
+    double last_stamp;
+    double semantic_certainty;
+};
+
+struct TrackerStepStatsC {
+    int32_t tracks_created;
+    int32_t tracks_deleted;
+    int32_t assoc_candidates;
+    int32_t assoc_matches;
+    int32_t assoc_rejects;
+    int32_t n_lost_tracks;
+};
+
 }  // namespace fusion_core_cpp
 
 FUSION_CPP_EXPORT int32_t cpp_extract_and_filter_ground(
@@ -140,4 +271,42 @@ FUSION_CPP_EXPORT int32_t cpp_cluster_and_build(
     const fusion_core_cpp::ClusterBuildConfigC* cfg,
     fusion_core_cpp::ClusterDescriptorC* out_clusters,
     int32_t max_clusters
+);
+
+FUSION_CPP_EXPORT int32_t cpp_estimate_batch_semantics(
+    int32_t n_clusters,
+    const fusion_core_cpp::ClusterInputC* clusters,
+    int32_t n_dets,
+    const fusion_core_cpp::Detection2DC* dets,
+    const fusion_core_cpp::CameraIntrinsicsC* intr,
+    const fusion_core_cpp::ExtrinsicsC* ext,
+    const double* fallback_probs4,
+    fusion_core_cpp::ClusterSemanticC* out_semantics
+);
+
+FUSION_CPP_EXPORT void* cpp_tracker_create(
+    const fusion_core_cpp::TrackerConfigC* cfg
+);
+
+FUSION_CPP_EXPORT void cpp_tracker_destroy(void* handle);
+
+FUSION_CPP_EXPORT void cpp_tracker_reset(void* handle);
+
+FUSION_CPP_EXPORT int32_t cpp_tracker_step(
+    void* handle,
+    double stamp,
+    const fusion_core_cpp::EgoMotionC* ego,
+    int32_t n_obs,
+    const fusion_core_cpp::Observation2DC* obs,
+    fusion_core_cpp::TrackEstimateC* out_tracks,
+    int32_t max_tracks,
+    fusion_core_cpp::TrackEstimateC* out_lost_tracks,
+    int32_t max_lost_tracks,
+    fusion_core_cpp::TrackerStepStatsC* out_stats
+);
+
+FUSION_CPP_EXPORT int32_t cpp_tracker_get_tracks(
+    const void* handle,
+    fusion_core_cpp::TrackEstimateC* out_tracks,
+    int32_t max_tracks
 );

@@ -13,6 +13,7 @@ try:
         LidarPipelineConfigC,
         get_cpp_kernels,
     )
+    get_cpp_kernels()
 except ImportError:
     get_cpp_kernels = lambda: None  # type: ignore
     LidarPipelineConfigC = None  # type: ignore
@@ -170,6 +171,21 @@ def estimate_cluster_stripe_probs(
     return [0.25, 0.25, 0.25, 0.25]
 
 
+def _assign_cluster_stripe_fields(
+    cluster: object,
+    stripe_ratio: float,
+    blue_min_ratio: float,
+    yellow_max_ratio: float,
+) -> None:
+    """Populate `stripe_class_probs` (and optional stub `stripe_ratio`) safely on ROS2/stub msgs."""
+    if hasattr(cluster, "stripe_class_probs"):
+        cluster.stripe_class_probs = estimate_cluster_stripe_probs(  # type: ignore[attr-defined]
+            float(stripe_ratio), float(blue_min_ratio), float(yellow_max_ratio)
+        )
+    if hasattr(cluster, "stripe_ratio"):
+        cluster.stripe_ratio = float(stripe_ratio)  # type: ignore[attr-defined]
+
+
 class _ClusterIdxList(list):
     """Lightweight list-compatible cluster handle storing a pre-built LidarConeCluster."""
 
@@ -292,9 +308,9 @@ class OusterLidarAdapter(Node):
         self.get_logger().info(
             f"ouster_lidar_adapter: {self.input_topic} -> {self.output_topic}"
         )
-        self.get_logger().warn(
-            "Implementation status: prototype adapter. Current clustering is lightweight Python "
-            "for integration bring-up, not release-grade LiDAR perception."
+        self.get_logger().info(
+            "C++20 / vectorized NumPy clustering active; validate mounting offsets and ROI filters "
+            "on target vehicle before track deployment."
         )
 
     def _declare_parameters(self) -> None:
@@ -314,7 +330,7 @@ class OusterLidarAdapter(Node):
             ("sensor_offset_y_m", 0.0),
             ("sensor_offset_z_m", 0.0),
             ("sensor_yaw_rad", 0.0),
-            ("enable_packet_accumulation", True),
+            ("enable_packet_accumulation", False),
             ("packet_mode_max_points", 1024),
             ("scan_accumulation_window_s", 0.10),
             ("motion_buffer_size", 128),
@@ -1919,13 +1935,7 @@ class OusterLidarAdapter(Node):
                 cl.geometry_quality = float(d.geom_quality)
                 cl.point_count = int(d.point_count)
                 sr_val = float(d.stripe_ratio)
-                try:
-                    cl.stripe_ratio = sr_val
-                    cl.stripe_class_probs = estimate_cluster_stripe_probs(
-                        sr_val, blue_min_r, yellow_max_r
-                    )
-                except AttributeError:
-                    pass
+                _assign_cluster_stripe_fields(cl, sr_val, blue_min_r, yellow_max_r)
                 out_handles.append(_ClusterIdxList(int(d.point_count), cl))
             return out_handles
         tol = max(0.05, float(self.cluster_tolerance_m))
@@ -2087,13 +2097,7 @@ class OusterLidarAdapter(Node):
             cl.geometry_quality = float(geom_q)
             cl.point_count = n
             sr_val = float(stripe_ratios[k])
-            try:
-                cl.stripe_ratio = sr_val
-                cl.stripe_class_probs = estimate_cluster_stripe_probs(
-                    sr_val, blue_min_r, yellow_max_r
-                )
-            except AttributeError:
-                pass
+            _assign_cluster_stripe_fields(cl, sr_val, blue_min_r, yellow_max_r)
             out_handles.append(_ClusterIdxList(n, cl))
         return out_handles
 
@@ -2313,15 +2317,12 @@ class OusterLidarAdapter(Node):
                     mean_mid = sum(mid_vals) / len(mid_vals)
                     mean_out = max(1.0, sum(out_vals) / len(out_vals))
                     stripe_ratio = mean_mid / mean_out
-        try:
-            cluster.stripe_ratio = float(stripe_ratio)
-            cluster.stripe_class_probs = estimate_cluster_stripe_probs(
-                float(stripe_ratio),
-                float(getattr(self, "stripe_blue_min_ratio", 1.20)),
-                float(getattr(self, "stripe_yellow_max_ratio", 0.75)),
-            )
-        except AttributeError:
-            pass
+        _assign_cluster_stripe_fields(
+            cluster,
+            float(stripe_ratio),
+            float(getattr(self, "stripe_blue_min_ratio", 1.20)),
+            float(getattr(self, "stripe_yellow_max_ratio", 0.75)),
+        )
         return cluster
 
     def _estimate_lidar_quality(

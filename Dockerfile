@@ -41,10 +41,10 @@ COPY ci /workspace/ci
 COPY ros_entrypoint.sh /ros_entrypoint.sh
 RUN chmod +x /ros_entrypoint.sh
 
-# Build ROS 2 workspace
+# Build ROS 2 workspace (including C++20 kernels and composable nodes)
 WORKDIR /workspace/Fusion/ros2_ws
 RUN /bin/bash -c "source /opt/ros/humble/setup.bash && \
-    colcon build --packages-select fusion_interfaces fusion_core fusion_adapters --symlink-install"
+    colcon build --packages-select fusion_interfaces fusion_core_cpp fusion_core fusion_adapters --symlink-install"
 
 # Expose Foxglove Studio WebSocket bridge port
 EXPOSE 8765

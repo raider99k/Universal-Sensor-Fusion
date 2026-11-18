@@ -163,9 +163,9 @@ class CameraDetectionAdapter(Node):
         self.get_logger().info(
             f"camera_detection_adapter: {self.input_topic} -> {self.output_topic}"
         )
-        self.get_logger().warn(
-            "Implementation status: prototype adapter. Validate class-map and detection schema "
-            "against your deployed camera detector before production use."
+        self.get_logger().info(
+            "Validate class-map and detection schema against your deployed camera detector "
+            "before track deployment."
         )
 
     def _on_quality(self, msg: Float32) -> None:

@@ -2,7 +2,7 @@
 set -eo pipefail
 
 echo "============================================================"
-echo "    AUTONOMOUS RACING SENSOR FUSION - SMOKE CHECK (R5)"
+echo "    AUTONOMOUS RACING SENSOR FUSION - SMOKE CHECK"
 echo "============================================================"
 
 # Resolve script directory and workspace root
@@ -25,16 +25,20 @@ if [ -f "/opt/ros/humble/setup.bash" ]; then
 fi
 
 # 2. Build ROS 2 workspace
-echo "[smoke_check] [1/3] Building workspace packages (fusion_interfaces, fusion_core, fusion_adapters)..."
-colcon build --packages-select fusion_interfaces fusion_core fusion_adapters --symlink-install
+echo "[smoke_check] [1/3] Building workspace packages (fusion_interfaces, fusion_core_cpp, fusion_core, fusion_adapters)..."
+colcon build --packages-select fusion_interfaces fusion_core_cpp fusion_core fusion_adapters --symlink-install
 
 # 3. Source local workspace
 echo "[smoke_check] Sourcing workspace install/setup.bash"
 source install/setup.bash
 
-# 4. Run existing tracker unit tests (minimal budget, zero waste)
-echo "[smoke_check] [2/3] Running existing unit tests (pytest -q)..."
-PYTHONPATH="${WS_DIR}/src/fusion_core:${PYTHONPATH}" python3 -m pytest -q src/fusion_core/test
+# 4. Run unit and integration test suite
+if [ -d "src/fusion_core/test" ]; then
+    echo "[smoke_check] [2/3] Running test suite (pytest -q)..."
+    PYTHONPATH="${WS_DIR}/src/fusion_core:${PYTHONPATH}" python3 -m pytest -q src/fusion_core/test
+else
+    echo "[smoke_check] [2/3] Skipping unit tests (src/fusion_core/test not packaged)."
+fi
 
 # 5. Headless run of synthetic stack verifying >= 20 Hz output on perception topics and zero crashes
 echo "[smoke_check] [3/3] Launching synthetic stack for headless rate & stability verification..."

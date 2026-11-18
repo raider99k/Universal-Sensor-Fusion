@@ -37,6 +37,7 @@ setup(
             "interface_conformance_checker = fusion_core.interface_conformance_checker:main",
             "fusion_regression_suite = fusion_core.regression_suite:main",
             "fsd_rosbag_benchmark = fusion_core.fsd_rosbag_benchmark:main",
+            "fusion_auto_calibrate = fusion_core.auto_calibrate:main",
         ],
     },
 )

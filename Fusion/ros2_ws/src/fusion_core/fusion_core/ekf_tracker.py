@@ -384,6 +384,21 @@ class MultiTargetEKFTracker:
 
         return list(self.tracks.values()), lost_tracks, stats
 
+    @staticmethod
+    def _infer_corridor_side_sign(
+        blue_ys: Sequence[float], yellow_ys: Sequence[float]
+    ) -> float:
+        """Return +1.0 when blue cones lie at greater y than yellow cones, else -1.0."""
+        if blue_ys and yellow_ys:
+            mean_b = sum(blue_ys) / len(blue_ys)
+            mean_y = sum(yellow_ys) / len(yellow_ys)
+            return 1.0 if mean_b >= mean_y else -1.0
+        if blue_ys:
+            return -1.0 if (sum(blue_ys) / len(blue_ys)) < -0.5 else 1.0
+        if yellow_ys:
+            return -1.0 if (sum(yellow_ys) / len(yellow_ys)) > 0.5 else 1.0
+        return 1.0
+
     def _regularize_observations_with_corridor_prior(
         self,
         observations: List[Observation2D],
@@ -394,33 +409,37 @@ class MultiTargetEKFTracker:
             return observations
 
         # Estimate local clothoid track centerline y_center(x) = y0 + slope * (x - xm) + 0.5 * kappa * (x - xm)^2
-        # from confirmed near/mid-field landmarks (left=Blue -> y - 1.5m, right=Yellow -> y + 1.5m)
-        xs_c: List[float] = []
-        ys_c: List[float] = []
-        n_blue_c = 0
-        n_yellow_c = 0
+        # from confirmed near/mid-field landmarks, adapting automatically to track lateral polarity.
+        blue_pts: List[Tuple[float, float]] = []
+        yellow_pts: List[Tuple[float, float]] = []
         for tr in self.tracks.values():
             if tr.misses <= 2 and 1.8 <= tr.state[0] <= 15.5:
                 tp = _normalize_probs(tr.class_probs)
                 if tp[0] > 0.55 and tp[2] < 0.30:
-                    xs_c.append(tr.state[0])
-                    ys_c.append(tr.state[1] - 1.50)
-                    n_blue_c += 1
+                    blue_pts.append((tr.state[0], tr.state[1]))
                 elif tp[1] > 0.55 and tp[2] < 0.30:
-                    xs_c.append(tr.state[0])
-                    ys_c.append(tr.state[1] + 1.50)
-                    n_yellow_c += 1
+                    yellow_pts.append((tr.state[0], tr.state[1]))
         for obs in observations:
             if 1.8 <= obs.x <= 15.0:
                 op = _normalize_probs(obs.class_probs)
                 if op[0] > 0.65 and op[2] < 0.30:
-                    xs_c.append(obs.x)
-                    ys_c.append(obs.y - 1.50)
-                    n_blue_c += 1
+                    blue_pts.append((obs.x, obs.y))
                 elif op[1] > 0.65 and op[2] < 0.30:
-                    xs_c.append(obs.x)
-                    ys_c.append(obs.y + 1.50)
-                    n_yellow_c += 1
+                    yellow_pts.append((obs.x, obs.y))
+
+        side_sign = self._infer_corridor_side_sign(
+            [y for _, y in blue_pts], [y for _, y in yellow_pts]
+        )
+        xs_c: List[float] = []
+        ys_c: List[float] = []
+        for x_b, y_b in blue_pts:
+            xs_c.append(x_b)
+            ys_c.append(y_b - side_sign * 1.50)
+        for x_y, y_y in yellow_pts:
+            xs_c.append(x_y)
+            ys_c.append(y_y + side_sign * 1.50)
+        n_blue_c = len(blue_pts)
+        n_yellow_c = len(yellow_pts)
 
         xm = 6.0
         y0 = 0.0
@@ -467,7 +486,9 @@ class MultiTargetEKFTracker:
             slope=slope,
             kappa=kappa,
             confidence=conf_corridor,
+            side_sign=side_sign,
         )
+        self._last_corridor_stamp = self.last_step_stamp
 
         regularized: List[Observation2D] = []
         for obs in observations:
@@ -477,18 +498,18 @@ class MultiTargetEKFTracker:
                 continue
             dx_m = obs.x - xm
             y_center = y0 + slope * dx_m + 0.5 * kappa * dx_m * dx_m
-            dy = obs.y - y_center
-            if abs(dy) < 0.45:
+            dy_signed = side_sign * (obs.y - y_center)
+            if abs(dy_signed) < 0.45:
                 regularized.append(obs)
                 continue
-            p_blue_corr = 1.0 / (1.0 + math.exp(-_clamp(2.2 * dy, -12.0, 12.0)))
+            p_blue_corr = 1.0 / (1.0 + math.exp(-_clamp(2.2 * dy_signed, -12.0, 12.0)))
             p_yellow_corr = 1.0 - p_blue_corr
             r = math.hypot(obs.x, obs.y)
             info = _normalized_information(p)
             contradicts_far_corridor = (
                 well_conditioned_corridor
                 and r >= 14.0
-                and ((dy > 1.20 and p[1] > p[0]) or (dy < -1.20 and p[0] > p[1]))
+                and ((dy_signed > 1.20 and p[1] > p[0]) or (dy_signed < -1.20 and p[0] > p[1]))
             )
             if (0.03 <= info <= 0.45 and r >= 8.5) or contradicts_far_corridor:
                 w_eff = (
@@ -533,6 +554,7 @@ class MultiTargetEKFTracker:
         confidence: float,
         horizon_m: float = 20.0,
         step_m: float = 1.0,
+        side_sign: float = 1.0,
     ) -> CorridorEstimate:
         # Estimate dynamic half-width from confirmed blue/yellow track residuals around centerline
         left_offsets: List[float] = []
@@ -542,23 +564,25 @@ class MultiTargetEKFTracker:
                 tp = _normalize_probs(tr.class_probs)
                 dx = tr.state[0] - xm
                 yc = y0 + slope * dx + 0.5 * kappa * dx * dx
-                dy = tr.state[1] - yc
-                if tp[0] > 0.50 and dy > 0.5:
-                    left_offsets.append(dy)
-                elif tp[1] > 0.50 and dy < -0.5:
-                    right_offsets.append(-dy)
+                dy_signed = side_sign * (tr.state[1] - yc)
+                if tp[0] > 0.50 and dy_signed > 0.5:
+                    left_offsets.append(dy_signed)
+                elif tp[1] > 0.50 and dy_signed < -0.5:
+                    right_offsets.append(-dy_signed)
 
-        half_w_left = (
+        half_w_blue = (
             _clamp(sum(left_offsets) / len(left_offsets), 1.25, 2.50)
             if left_offsets
             else 1.50
         )
-        half_w_right = (
+        half_w_yellow = (
             _clamp(sum(right_offsets) / len(right_offsets), 1.25, 2.50)
             if right_offsets
             else 1.50
         )
-        track_width_m = float(half_w_left + half_w_right)
+        track_width_m = float(half_w_blue + half_w_yellow)
+        half_w_pos_y = half_w_blue if side_sign >= 0.0 else half_w_yellow
+        half_w_neg_y = half_w_yellow if side_sign >= 0.0 else half_w_blue
 
         n_steps = max(2, int(round(horizon_m / max(0.25, step_m))) + 1)
         left_xy: List[Tuple[float, float]] = []
@@ -573,8 +597,8 @@ class MultiTargetEKFTracker:
             # Normal offset (-sin(heading), cos(heading))
             nx = -math.sin(heading)
             ny = math.cos(heading)
-            left_xy.append((round(x + half_w_left * nx, 4), round(yc + half_w_left * ny, 4)))
-            right_xy.append((round(x - half_w_right * nx, 4), round(yc - half_w_right * ny, 4)))
+            left_xy.append((round(x + half_w_pos_y * nx, 4), round(yc + half_w_pos_y * ny, 4)))
+            right_xy.append((round(x - half_w_neg_y * nx, 4), round(yc - half_w_neg_y * ny, 4)))
             waypoints.append((round(x, 4), round(yc, 4), round(heading, 5), round(kappa, 6)))
 
         return CorridorEstimate(
@@ -598,22 +622,43 @@ class MultiTargetEKFTracker:
         """Compute or return the current quadratic clothoid track corridor and centerline waypoints."""
         if (
             self.last_corridor_estimate is not None
+            and abs(getattr(self, "_last_corridor_stamp", -1e9) - self.last_step_stamp) < 1e-9
             and abs(horizon_m - 20.0) < 1e-3
             and abs(step_m - 1.0) < 1e-3
         ):
             return self.last_corridor_estimate
 
+        min_hits_pref = min(2, max(1, int(self.cfg.confirm_hits)))
+        eligible_tracks = [
+            tr for tr in self.tracks.values()
+            if tr.misses <= 2 and 1.5 <= tr.state[0] <= 16.0 and tr.hits >= min_hits_pref
+        ]
+        if len(eligible_tracks) < 2:
+            eligible_tracks = [
+                tr for tr in self.tracks.values()
+                if tr.misses <= 2 and 1.5 <= tr.state[0] <= 16.0
+            ]
+
+        blue_pts: List[Tuple[float, float]] = []
+        yellow_pts: List[Tuple[float, float]] = []
+        for tr in eligible_tracks:
+            tp = _normalize_probs(tr.class_probs)
+            if tp[0] > 0.50 and tp[2] < 0.35:
+                blue_pts.append((tr.state[0], tr.state[1]))
+            elif tp[1] > 0.50 and tp[2] < 0.35:
+                yellow_pts.append((tr.state[0], tr.state[1]))
+
+        side_sign = self._infer_corridor_side_sign(
+            [y for _, y in blue_pts], [y for _, y in yellow_pts]
+        )
         xs_c: List[float] = []
         ys_c: List[float] = []
-        for tr in self.tracks.values():
-            if tr.misses <= 2 and 1.5 <= tr.state[0] <= 16.0:
-                tp = _normalize_probs(tr.class_probs)
-                if tp[0] > 0.50 and tp[2] < 0.35:
-                    xs_c.append(tr.state[0])
-                    ys_c.append(tr.state[1] - 1.50)
-                elif tp[1] > 0.50 and tp[2] < 0.35:
-                    xs_c.append(tr.state[0])
-                    ys_c.append(tr.state[1] + 1.50)
+        for x_b, y_b in blue_pts:
+            xs_c.append(x_b)
+            ys_c.append(y_b - side_sign * 1.50)
+        for x_y, y_y in yellow_pts:
+            xs_c.append(x_y)
+            ys_c.append(y_y + side_sign * 1.50)
 
         xm = 6.0
         y0 = 0.0
@@ -655,8 +700,10 @@ class MultiTargetEKFTracker:
             confidence=conf,
             horizon_m=horizon_m,
             step_m=step_m,
+            side_sign=side_sign,
         )
         self.last_corridor_estimate = est
+        self._last_corridor_stamp = self.last_step_stamp
         return est
 
     def _solve_assignments(

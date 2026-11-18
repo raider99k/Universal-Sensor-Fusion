@@ -944,3 +944,963 @@ FUSION_CPP_EXPORT int32_t cpp_cluster_and_build(
     }
     return out_n;
 }
+
+namespace {
+
+inline void normalize_probs4(const double* in, double* out) {
+    double s = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        out[i] = (in && std::isfinite(in[i]) && in[i] > 0.0) ? in[i] : 0.0;
+        s += out[i];
+    }
+    if (s <= 1e-9) {
+        out[0] = out[1] = out[2] = out[3] = 0.25;
+        return;
+    }
+    if (std::abs(s - 1.0) <= 1e-6) {
+        return;
+    }
+    const double inv = 1.0 / s;
+    for (int i = 0; i < 4; ++i) {
+        out[i] *= inv;
+    }
+}
+
+inline double normalized_information4(const double* probs) {
+    double p[4];
+    normalize_probs4(probs, p);
+    double entropy = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        if (p[i] > 1e-12) {
+            entropy -= p[i] * std::log(p[i]);
+        }
+    }
+    constexpr double max_entropy = 1.3862943611198906;  // ln(4.0)
+    return clamp_d(1.0 - (entropy / max_entropy), 0.0, 1.0);
+}
+
+// Kuhn-Munkres / Jonker-Volgenant O(n^2 m) minimum cost bipartite matching.
+// Returns matched column index for each row (-1 if unmatched).
+std::vector<int32_t> solve_hungarian_min_cost(
+    int32_t n_rows,
+    int32_t n_cols,
+    const std::vector<double>& cost_flat
+) {
+    std::vector<int32_t> row_to_col(std::max(0, n_rows), -1);
+    if (n_rows <= 0 || n_cols <= 0) {
+        return row_to_col;
+    }
+    const bool transposed = (n_rows > n_cols);
+    const int32_t R = transposed ? n_cols : n_rows;
+    const int32_t C = transposed ? n_rows : n_cols;
+
+    auto get_cost = [&](int32_t r, int32_t c) -> double {
+        return transposed ? cost_flat[c * n_cols + r] : cost_flat[r * n_cols + c];
+    };
+
+    const double kInf = 1e18;
+    std::vector<double> u(R + 1, 0.0);
+    std::vector<double> v(C + 1, 0.0);
+    std::vector<int32_t> p(C + 1, 0);
+    std::vector<int32_t> way(C + 1, 0);
+
+    for (int32_t i = 1; i <= R; ++i) {
+        p[0] = i;
+        int32_t j0 = 0;
+        std::vector<double> minv(C + 1, kInf);
+        std::vector<uint8_t> used(C + 1, 0);
+        do {
+            used[j0] = 1;
+            const int32_t i0 = p[j0];
+            double delta = kInf;
+            int32_t j1 = 0;
+            for (int32_t j = 1; j <= C; ++j) {
+                if (!used[j]) {
+                    const double cur = get_cost(i0 - 1, j - 1) - u[i0] - v[j];
+                    if (cur < minv[j]) {
+                        minv[j] = cur;
+                        way[j] = j0;
+                    }
+                    if (minv[j] < delta) {
+                        delta = minv[j];
+                        j1 = j;
+                    }
+                }
+            }
+            for (int32_t j = 0; j <= C; ++j) {
+                if (used[j]) {
+                    u[p[j]] += delta;
+                    v[j] -= delta;
+                } else {
+                    minv[j] -= delta;
+                }
+            }
+            j0 = j1;
+        } while (p[j0] != 0);
+        do {
+            const int32_t j1 = way[j0];
+            p[j0] = p[j1];
+            j0 = j1;
+        } while (j0 != 0);
+    }
+
+    for (int32_t j = 1; j <= C; ++j) {
+        if (p[j] > 0) {
+            if (transposed) {
+                row_to_col[j - 1] = p[j] - 1;
+            } else {
+                row_to_col[p[j] - 1] = j - 1;
+            }
+        }
+    }
+    return row_to_col;
+}
+
+inline bool project_lidar_point_c(
+    double px,
+    double py,
+    double pz,
+    const fusion_core_cpp::CameraIntrinsicsC* intr,
+    const fusion_core_cpp::ExtrinsicsC* ext,
+    double& out_u,
+    double& out_v,
+    double& out_depth
+) {
+    const double* R = ext->r;
+    const double* t = ext->t;
+    const double x_cam = R[0] * px + R[1] * py + R[2] * pz + t[0];
+    const double y_cam = R[3] * px + R[4] * py + R[5] * pz + t[1];
+    const double z_cam = R[6] * px + R[7] * py + R[8] * pz + t[2];
+    if (z_cam <= ext->min_depth_m || z_cam >= ext->max_depth_m) {
+        return false;
+    }
+    const double xn = x_cam / z_cam;
+    const double yn = y_cam / z_cam;
+    double xd = xn;
+    double yd = yn;
+    if (std::abs(intr->k1) > 1e-12 || std::abs(intr->k2) > 1e-12 ||
+        std::abs(intr->p1) > 1e-12 || std::abs(intr->p2) > 1e-12 ||
+        std::abs(intr->k3) > 1e-12) {
+        const double r2 = xn * xn + yn * yn;
+        const double r4 = r2 * r2;
+        const double r6 = r4 * r2;
+        const double radial = 1.0 + intr->k1 * r2 + intr->k2 * r4 + intr->k3 * r6;
+        const double xy2 = 2.0 * xn * yn;
+        xd = xn * radial + intr->p1 * xy2 + intr->p2 * (r2 + 2.0 * xn * xn);
+        yd = yn * radial + intr->p1 * (r2 + 2.0 * yn * yn) + intr->p2 * xy2;
+    }
+    const double u = intr->fx * xd + intr->cx;
+    const double v = intr->fy * yd + intr->cy;
+    if (u < 0.0 || u >= static_cast<double>(intr->width) ||
+        v < 0.0 || v >= static_cast<double>(intr->height)) {
+        return false;
+    }
+    out_u = u;
+    out_v = v;
+    out_depth = z_cam;
+    return true;
+}
+
+inline double detection_likelihood_c(
+    const fusion_core_cpp::Detection2DC& det,
+    const fusion_core_cpp::ExtrinsicsC* ext,
+    double u,
+    double v
+) {
+    const double width = std::max(1.0, det.xmax - det.xmin);
+    const double height = std::max(1.0, det.ymax - det.ymin);
+    const double cx = 0.5 * (det.xmin + det.xmax);
+    const double cy = 0.5 * (det.ymin + det.ymax);
+    const double half_w = 0.5 * width;
+    const double half_h = 0.5 * height;
+
+    if (ext->soft_likelihood_enabled == 0) {
+        if (u < det.xmin || u > det.xmax || v < det.ymin || v > det.ymax) {
+            return 0.0;
+        }
+        return 1.0;
+    }
+
+    const double outside_w = std::max(1.0, ext->soft_likelihood_outside_ratio * half_w);
+    const double outside_h = std::max(1.0, ext->soft_likelihood_outside_ratio * half_h);
+    if (std::abs(u - cx) > outside_w || std::abs(v - cy) > outside_h) {
+        return 0.0;
+    }
+    const double sigma_u = std::max(1.0, ext->soft_likelihood_sigma_scale * width);
+    const double sigma_v = std::max(1.0, ext->soft_likelihood_sigma_scale * height);
+    const double du = (u - cx) / sigma_u;
+    const double dv = (v - cy) / sigma_v;
+    const double val = std::exp(-0.5 * (du * du + dv * dv));
+    if (val < ext->soft_likelihood_min_value) {
+        return 0.0;
+    }
+    return clamp_d(val, 0.0, 1.0);
+}
+
+struct ProjectedSampleC {
+    double u;
+    double v;
+    double depth;
+};
+
+inline void sample_cluster_points_c(
+    const fusion_core_cpp::ClusterInputC& c,
+    const fusion_core_cpp::ExtrinsicsC* ext,
+    ProjectedSampleC* pts3d,
+    int32_t& out_count
+) {
+    double cxx = c.cov_xx;
+    double cyy = c.cov_yy;
+    double czz = c.cov_zz;
+    if (std::abs(cxx) < 1e-12 && std::abs(cyy) < 1e-12 && std::abs(czz) < 1e-12) {
+        cxx = 0.05;
+        cyy = 0.05;
+        czz = 0.1;
+    }
+    const double var_x = std::max(1e-4, cxx);
+    const double var_y = std::max(1e-4, cyy);
+    const double var_z = std::max(1e-4, czz);
+    const double radius = ext->sample_radius_scale * std::max(0.05, std::sqrt(std::max(var_x, var_y)));
+    const double z_off = 0.5 * std::sqrt(var_z);
+    const double x = c.cx, y = c.cy, z = c.cz;
+    pts3d[0] = {x, y, z};
+    pts3d[1] = {x + radius, y, z};
+    pts3d[2] = {x - radius, y, z};
+    pts3d[3] = {x, y + radius, z};
+    pts3d[4] = {x, y - radius, z};
+    pts3d[5] = {x, y, z + z_off};
+    pts3d[6] = {x, y, z - z_off};
+    out_count = 7;
+    if (ext->enable_frustum_hull_sampling != 0) {
+        constexpr double cone_r = 0.095;
+        pts3d[7] = {x, y, z + 0.16};
+        pts3d[8] = {x, y + cone_r, z - 0.06};
+        pts3d[9] = {x, y - cone_r, z - 0.06};
+        pts3d[10] = {x, y + 0.5 * cone_r, z + 0.08};
+        pts3d[11] = {x, y - 0.5 * cone_r, z + 0.08};
+        out_count = 12;
+    }
+}
+
+}  // namespace
+
+FUSION_CPP_EXPORT int32_t cpp_estimate_batch_semantics(
+    int32_t n_clusters,
+    const fusion_core_cpp::ClusterInputC* clusters,
+    int32_t n_dets,
+    const fusion_core_cpp::Detection2DC* dets,
+    const fusion_core_cpp::CameraIntrinsicsC* intr,
+    const fusion_core_cpp::ExtrinsicsC* ext,
+    const double* fallback_probs4,
+    fusion_core_cpp::ClusterSemanticC* out_semantics
+) {
+    if (!out_semantics || !intr || !ext || n_clusters <= 0 || !clusters) {
+        return 0;
+    }
+    double fallback[4];
+    normalize_probs4(fallback_probs4, fallback);
+
+    if (n_dets <= 0 || !dets) {
+        for (int32_t c_idx = 0; c_idx < n_clusters; ++c_idx) {
+            fusion_core_cpp::ClusterSemanticC& o = out_semantics[c_idx];
+            for (int k = 0; k < 4; ++k) o.class_probs[k] = fallback[k];
+            o.semantic_weight = clamp_d(ext->no_match_semantic_weight, 0.0, 1.0);
+            o.projected_samples = 0;
+            o.matched_samples = 0;
+            o.matched_weight_sum = 0.0;
+            o.best_confidence = 0.0;
+            o.residual_samples = 0;
+            o.residual_sum_px = 0.0;
+            o.residual_max_px = 0.0;
+            o.matched_detection_idx = -1;
+        }
+        return n_clusters;
+    }
+
+    std::vector<std::vector<ProjectedSampleC>> all_proj(static_cast<size_t>(n_clusters));
+    for (int32_t c_idx = 0; c_idx < n_clusters; ++c_idx) {
+        ProjectedSampleC samples3d[12];
+        int32_t n_samp = 0;
+        sample_cluster_points_c(clusters[c_idx], ext, samples3d, n_samp);
+        auto& proj_vec = all_proj[static_cast<size_t>(c_idx)];
+        proj_vec.reserve(static_cast<size_t>(n_samp));
+        for (int32_t s = 0; s < n_samp; ++s) {
+            double u = 0.0, v = 0.0, depth = 0.0;
+            if (project_lidar_point_c(samples3d[s].u, samples3d[s].v, samples3d[s].depth,
+                                      intr, ext, u, v, depth)) {
+                proj_vec.push_back({u, v, depth});
+            }
+        }
+    }
+
+    constexpr double kDisallowedCost = 1e6;
+    std::vector<double> cost_mat(static_cast<size_t>(n_clusters) * static_cast<size_t>(n_dets),
+                                 kDisallowedCost);
+    std::vector<uint8_t> valid_pair(static_cast<size_t>(n_clusters) * static_cast<size_t>(n_dets), 0);
+    bool any_valid = false;
+
+    for (int32_t c_idx = 0; c_idx < n_clusters; ++c_idx) {
+        const auto& proj_pts = all_proj[static_cast<size_t>(c_idx)];
+        if (proj_pts.empty()) continue;
+        for (int32_t d_idx = 0; d_idx < n_dets; ++d_idx) {
+            const auto& det = dets[d_idx];
+            const double width = det.xmax - det.xmin;
+            const double height = det.ymax - det.ymin;
+            const double area = std::max(1.0, width * height);
+            const double inv_sqrt_area = 1.0 / std::sqrt(area);
+            const double center_u = 0.5 * (det.xmin + det.xmax);
+            const double center_v = 0.5 * (det.ymin + det.ymax);
+            const double diag_px = std::max(4.0, std::hypot(width, height));
+
+            double w_sum = 0.0;
+            double res_norm_sum = 0.0;
+            int32_t matched_cnt = 0;
+            for (const auto& pr : proj_pts) {
+                const double lk = detection_likelihood_c(det, ext, pr.u, pr.v);
+                if (lk <= 0.0) continue;
+                const double dw = clamp_d(1.0 - pr.depth / std::max(1.0, ext->max_depth_m), 0.2, 1.0);
+                w_sum += det.confidence * lk * inv_sqrt_area * dw;
+                res_norm_sum += std::hypot(pr.u - center_u, pr.v - center_v) / diag_px;
+                ++matched_cnt;
+            }
+            if (matched_cnt > 0 && w_sum > 1e-9) {
+                const double mean_res_norm = res_norm_sum / static_cast<double>(matched_cnt);
+                const double cost = std::max(0.01, 10.0 / (1.0 + 25.0 * w_sum) + 0.5 * mean_res_norm);
+                const size_t flat_idx = static_cast<size_t>(c_idx) * static_cast<size_t>(n_dets) +
+                                        static_cast<size_t>(d_idx);
+                cost_mat[flat_idx] = cost;
+                valid_pair[flat_idx] = 1;
+                any_valid = true;
+            }
+        }
+    }
+
+    std::vector<int32_t> assigned_det(static_cast<size_t>(n_clusters), -1);
+    if (any_valid) {
+        auto match = solve_hungarian_min_cost(n_clusters, n_dets, cost_mat);
+        for (int32_t c_idx = 0; c_idx < n_clusters; ++c_idx) {
+            const int32_t d_idx = match[static_cast<size_t>(c_idx)];
+            if (d_idx >= 0 && d_idx < n_dets) {
+                const size_t flat_idx = static_cast<size_t>(c_idx) * static_cast<size_t>(n_dets) +
+                                        static_cast<size_t>(d_idx);
+                if (valid_pair[flat_idx] != 0) {
+                    assigned_det[static_cast<size_t>(c_idx)] = d_idx;
+                }
+            }
+        }
+    }
+
+    for (int32_t c_idx = 0; c_idx < n_clusters; ++c_idx) {
+        const auto& proj_pts = all_proj[static_cast<size_t>(c_idx)];
+        const int32_t target_d = assigned_det[static_cast<size_t>(c_idx)];
+        const int32_t projected_samples = static_cast<int32_t>(proj_pts.size());
+
+        int32_t matched_samples = 0;
+        double matched_weight_sum = 0.0;
+        double best_confidence = 0.0;
+        int32_t residual_samples = 0;
+        double residual_sum_px = 0.0;
+        double residual_max_px = 0.0;
+        double acc[4] = {0.0, 0.0, 0.0, 0.0};
+
+        if (target_d >= 0) {
+            const auto& det = dets[target_d];
+            double norm_det_p[4];
+            normalize_probs4(det.class_probs, norm_det_p);
+            const double area = std::max(1.0, (det.xmax - det.xmin) * (det.ymax - det.ymin));
+            const double inv_sqrt_area = 1.0 / std::sqrt(area);
+            const double center_u = 0.5 * (det.xmin + det.xmax);
+            const double center_v = 0.5 * (det.ymin + det.ymax);
+
+            for (const auto& pr : proj_pts) {
+                const double lk = detection_likelihood_c(det, ext, pr.u, pr.v);
+                if (lk <= 0.0) continue;
+                const double det_weight = det.confidence * lk * inv_sqrt_area;
+                if (det_weight <= 1e-9) continue;
+
+                ++matched_samples;
+                const double dw = clamp_d(1.0 - pr.depth / std::max(1.0, ext->max_depth_m), 0.2, 1.0);
+                const double weight = det_weight * dw;
+                matched_weight_sum += weight;
+                best_confidence = std::max(best_confidence, det.confidence);
+
+                const double res_px = std::hypot(pr.u - center_u, pr.v - center_v);
+                ++residual_samples;
+                residual_sum_px += res_px;
+                residual_max_px = std::max(residual_max_px, res_px);
+
+                for (int k = 0; k < 4; ++k) {
+                    acc[k] += weight * norm_det_p[k];
+                }
+            }
+        }
+
+        fusion_core_cpp::ClusterSemanticC& o = out_semantics[c_idx];
+        o.projected_samples = projected_samples;
+        o.matched_samples = matched_samples;
+        o.matched_weight_sum = matched_weight_sum;
+        o.best_confidence = best_confidence;
+        o.residual_samples = residual_samples;
+        o.residual_sum_px = residual_sum_px;
+        o.residual_max_px = residual_max_px;
+
+        if (matched_weight_sum <= 1e-9) {
+            for (int k = 0; k < 4; ++k) o.class_probs[k] = fallback[k];
+            o.semantic_weight = clamp_d(ext->no_match_semantic_weight, 0.0, 1.0);
+            o.matched_detection_idx = -1;
+        } else {
+            double raw_p[4];
+            for (int k = 0; k < 4; ++k) raw_p[k] = acc[k] / matched_weight_sum;
+            normalize_probs4(raw_p, o.class_probs);
+            const double coverage = (projected_samples > 0)
+                                        ? static_cast<double>(matched_samples) /
+                                              std::max(1.0, static_cast<double>(projected_samples))
+                                        : 0.0;
+            o.semantic_weight = clamp_d(
+                ext->min_semantic_weight + (1.0 - ext->min_semantic_weight) * coverage * best_confidence,
+                ext->min_semantic_weight,
+                1.0
+            );
+            o.matched_detection_idx = target_d;
+        }
+    }
+
+    return n_clusters;
+}
+
+namespace {
+
+struct TrackInternal {
+    fusion_core_cpp::TrackEstimateC est{};
+    double dirichlet_alpha[4]{0.25, 0.25, 0.25, 0.25};
+};
+
+struct TrackerInstance {
+    fusion_core_cpp::TrackerConfigC cfg{};
+    std::vector<TrackInternal> tracks;
+    int32_t next_track_id = 1;
+    double last_step_stamp = -1.0;
+};
+
+inline void mat_mul_4x4(const double a[16], const double b[16], double out[16]) {
+    for (int r = 0; r < 4; ++r) {
+        const int r4 = r * 4;
+        for (int c = 0; c < 4; ++c) {
+            out[r4 + c] = a[r4 + 0] * b[0 + c] + a[r4 + 1] * b[4 + c] +
+                          a[r4 + 2] * b[8 + c] + a[r4 + 3] * b[12 + c];
+        }
+    }
+}
+
+inline void mat_mul_4x4_trans_b(const double a[16], const double b[16], double out[16]) {
+    for (int r = 0; r < 4; ++r) {
+        const int r4 = r * 4;
+        for (int c = 0; c < 4; ++c) {
+            const int c4 = c * 4;
+            out[r4 + c] = a[r4 + 0] * b[c4 + 0] + a[r4 + 1] * b[c4 + 1] +
+                          a[r4 + 2] * b[c4 + 2] + a[r4 + 3] * b[c4 + 3];
+        }
+    }
+}
+
+void predict_track_c(
+    TrackInternal& tr,
+    double stamp,
+    double prev_step_stamp,
+    const fusion_core_cpp::EgoMotionC* ego,
+    const fusion_core_cpp::TrackerConfigC& cfg
+) {
+    const double ref_stamp = (prev_step_stamp >= 0.0)
+                                 ? std::max(tr.est.last_stamp, prev_step_stamp)
+                                 : tr.est.last_stamp;
+    const double dt = clamp_d(stamp - ref_stamp, 0.0, cfg.max_predict_dt);
+    if (dt <= 0.0) {
+        return;
+    }
+
+    if (cfg.motion_model_landmark != 0) {
+        const double x = tr.est.state[0];
+        const double y = tr.est.state[1];
+        double vx_ego = 0.0, vy_ego = 0.0, wz_ego = 0.0;
+        double dx = 0.0, dy = 0.0, dtheta = 0.0;
+        const bool has_ego = (ego != nullptr && ego->has_motion != 0);
+        if (has_ego) {
+            vx_ego = ego->vx;
+            vy_ego = ego->vy;
+            wz_ego = ego->wz;
+            if (ego->has_disp != 0) {
+                dx = ego->dx;
+                dy = ego->dy;
+                dtheta = ego->dyaw;
+            } else {
+                const double step_dt = clamp_d((ego->dt > 0.0) ? ego->dt : dt, 0.0, cfg.max_predict_dt);
+                dtheta = wz_ego * step_dt;
+                if (std::abs(dtheta) > 1e-5) {
+                    const double sin_dt = std::sin(dtheta);
+                    const double cos_dt = std::cos(dtheta);
+                    dx = (sin_dt * vx_ego - (1.0 - cos_dt) * vy_ego) / wz_ego;
+                    dy = ((1.0 - cos_dt) * vx_ego + sin_dt * vy_ego) / wz_ego;
+                } else {
+                    dx = vx_ego * step_dt - 0.5 * vy_ego * dtheta * step_dt;
+                    dy = vy_ego * step_dt + 0.5 * vx_ego * dtheta * step_dt;
+                }
+            }
+        }
+
+        const double cos_t = std::cos(dtheta);
+        const double sin_t = std::sin(dtheta);
+        const double xt = x - dx;
+        const double yt = y - dy;
+        const double x_new = cos_t * xt + sin_t * yt;
+        const double y_new = -sin_t * xt + cos_t * yt;
+        tr.est.state[0] = x_new;
+        tr.est.state[1] = y_new;
+        tr.est.state[2] = -vx_ego + wz_ego * y_new;
+        tr.est.state[3] = -vy_ego - wz_ego * x_new;
+
+        const double p00 = tr.est.covariance[0];
+        const double p01 = tr.est.covariance[1];
+        const double p10 = tr.est.covariance[4];
+        const double p11 = tr.est.covariance[5];
+
+        const double rp00 = cos_t * p00 + sin_t * p10;
+        const double rp01 = cos_t * p01 + sin_t * p11;
+        const double rp10 = -sin_t * p00 + cos_t * p10;
+        const double rp11 = -sin_t * p01 + cos_t * p11;
+
+        const double rpr00 = rp00 * cos_t + rp01 * sin_t;
+        const double rpr01 = -rp00 * sin_t + rp01 * cos_t;
+        const double rpr10 = rp10 * cos_t + rp11 * sin_t;
+        const double rpr11 = -rp10 * sin_t + rp11 * cos_t;
+
+        const double q_pos = (cfg.landmark_process_noise_pos * cfg.landmark_process_noise_pos) * dt;
+        double q00 = 0.0, q01 = 0.0, q11 = 0.0;
+        if (has_ego) {
+            const double var_dx = (cfg.odom_vx_std * dt) * (cfg.odom_vx_std * dt);
+            const double var_dy = (cfg.odom_vy_std * dt) * (cfg.odom_vy_std * dt);
+            const double var_dtheta = (cfg.odom_wz_std * dt) * (cfg.odom_wz_std * dt);
+            q00 = q_pos + var_dx + (y_new * y_new) * var_dtheta;
+            q11 = q_pos + var_dy + (x_new * x_new) * var_dtheta;
+            q01 = -(x_new * y_new) * var_dtheta;
+        } else {
+            const double q_static = std::max(q_pos, 0.25 * (cfg.process_noise_accel * cfg.process_noise_accel) * (dt * dt * dt));
+            q00 = q_static;
+            q11 = q_static;
+            q01 = 0.0;
+        }
+
+        const double p22 = tr.est.covariance[10];
+        const double p33 = tr.est.covariance[15];
+        for (int i = 0; i < 16; ++i) tr.est.covariance[i] = 0.0;
+        tr.est.covariance[0] = rpr00 + q00;
+        tr.est.covariance[1] = 0.5 * (rpr01 + rpr10) + q01;
+        tr.est.covariance[4] = tr.est.covariance[1];
+        tr.est.covariance[5] = rpr11 + q11;
+        tr.est.covariance[10] = p22;
+        tr.est.covariance[15] = p33;
+        return;
+    }
+
+    // Legacy Constant Velocity (CV)
+    tr.est.state[0] += tr.est.state[2] * dt;
+    tr.est.state[1] += tr.est.state[3] * dt;
+
+    double f[16] = {
+        1.0, 0.0, dt,  0.0,
+        0.0, 1.0, 0.0, dt,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    };
+    const double sigma_a2 = cfg.process_noise_accel * cfg.process_noise_accel;
+    const double dt2 = dt * dt;
+    const double dt3 = dt2 * dt;
+    const double dt4 = dt2 * dt2;
+    const double q[16] = {
+        0.25 * dt4 * sigma_a2, 0.0, 0.5 * dt3 * sigma_a2, 0.0,
+        0.0, 0.25 * dt4 * sigma_a2, 0.0, 0.5 * dt3 * sigma_a2,
+        0.5 * dt3 * sigma_a2, 0.0, dt2 * sigma_a2, 0.0,
+        0.0, 0.5 * dt3 * sigma_a2, 0.0, dt2 * sigma_a2
+    };
+    double fp[16], fpf_t[16];
+    mat_mul_4x4(f, tr.est.covariance, fp);
+    mat_mul_4x4_trans_b(fp, f, fpf_t);
+    for (int i = 0; i < 16; ++i) {
+        tr.est.covariance[i] = fpf_t[i] + q[i];
+    }
+}
+
+void update_track_c(
+    TrackInternal& tr,
+    const fusion_core_cpp::Observation2DC& obs,
+    double stamp,
+    double d2,
+    const fusion_core_cpp::EgoMotionC* ego,
+    const fusion_core_cpp::TrackerConfigC& cfg
+) {
+    const double* p = tr.est.covariance;
+    const double r00 = std::max(cfg.min_meas_var, obs.cov_xx);
+    const double r11 = std::max(cfg.min_meas_var, obs.cov_yy);
+    const double r01 = obs.cov_xy;
+
+    const double s00 = p[0] + r00;
+    const double s01 = p[1] + r01;
+    const double s10 = p[4] + r01;
+    const double s11 = p[5] + r11;
+    const double det = s00 * s11 - s01 * s10;
+    if (std::abs(det) < 1e-12) {
+        return;
+    }
+    const double inv_det = 1.0 / det;
+    const double inv_s[4] = {s11 * inv_det, -s01 * inv_det, -s10 * inv_det, s00 * inv_det};
+
+    double k[8];  // 4x2
+    for (int row = 0; row < 4; ++row) {
+        const double ph0 = p[row * 4 + 0];
+        const double ph1 = p[row * 4 + 1];
+        k[row * 2 + 0] = ph0 * inv_s[0] + ph1 * inv_s[2];
+        k[row * 2 + 1] = ph0 * inv_s[1] + ph1 * inv_s[3];
+    }
+
+    const double y0 = obs.x - tr.est.state[0];
+    const double y1 = obs.y - tr.est.state[1];
+    for (int row = 0; row < 4; ++row) {
+        tr.est.state[row] += k[row * 2 + 0] * y0 + k[row * 2 + 1] * y1;
+    }
+
+    if (cfg.motion_model_landmark != 0) {
+        if (ego != nullptr && ego->has_motion != 0) {
+            tr.est.state[2] = -ego->vx + ego->wz * tr.est.state[1];
+            tr.est.state[3] = -ego->vy - ego->wz * tr.est.state[0];
+        } else {
+            tr.est.state[2] = 0.0;
+            tr.est.state[3] = 0.0;
+        }
+    }
+
+    // Joseph form: P = (I - K H) P (I - K H)^T + K R K^T
+    double imkh[16] = {
+        1.0 - k[0], -k[1], 0.0, 0.0,
+        -k[2], 1.0 - k[3], 0.0, 0.0,
+        -k[4], -k[5],      1.0, 0.0,
+        -k[6], -k[7],      0.0, 1.0
+    };
+    double tmp1[16], term1[16];
+    mat_mul_4x4(imkh, tr.est.covariance, tmp1);
+    mat_mul_4x4_trans_b(tmp1, imkh, term1);
+
+    double kr[8];
+    for (int row = 0; row < 4; ++row) {
+        kr[row * 2 + 0] = k[row * 2 + 0] * r00 + k[row * 2 + 1] * r01;
+        kr[row * 2 + 1] = k[row * 2 + 0] * r01 + k[row * 2 + 1] * r11;
+    }
+    double p_next[16];
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            const double krkt = kr[r * 2 + 0] * k[c * 2 + 0] + kr[r * 2 + 1] * k[c * 2 + 1];
+            p_next[r * 4 + c] = term1[r * 4 + c] + krkt;
+        }
+    }
+    for (int r = 0; r < 4; ++r) {
+        for (int c = r; c < 4; ++c) {
+            const double sym = 0.5 * (p_next[r * 4 + c] + p_next[c * 4 + r]);
+            tr.est.covariance[r * 4 + c] = sym;
+            tr.est.covariance[c * 4 + r] = sym;
+        }
+    }
+
+    const double innovation_quality = std::exp(-0.5 * std::min(25.0, std::max(0.0, d2)));
+    double class_obs[4];
+    normalize_probs4(obs.class_probs, class_obs);
+    if (cfg.semantic_dirichlet != 0) {
+        const double info = normalized_information4(class_obs);
+        if (info > 1e-3) {
+            const double ew = cfg.dirichlet_evidence_scale *
+                              clamp_d(obs.quality, 0.05, 1.0) *
+                              std::max(0.2, innovation_quality) * info;
+            double total_conc = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                tr.dirichlet_alpha[i] += ew * class_obs[i];
+                total_conc += tr.dirichlet_alpha[i];
+            }
+            if (total_conc > cfg.dirichlet_max_concentration && total_conc > 1e-9) {
+                const double scale = cfg.dirichlet_max_concentration / total_conc;
+                for (int i = 0; i < 4; ++i) tr.dirichlet_alpha[i] *= scale;
+                total_conc = cfg.dirichlet_max_concentration;
+            }
+            tr.est.semantic_certainty = total_conc;
+            normalize_probs4(tr.dirichlet_alpha, tr.est.class_probs);
+        }
+    } else {
+        const double alpha = clamp_d(cfg.class_update_alpha, 0.0, 1.0);
+        double class_tr[4];
+        normalize_probs4(tr.est.class_probs, class_tr);
+        double raw[4];
+        for (int i = 0; i < 4; ++i) {
+            raw[i] = alpha * class_obs[i] + (1.0 - alpha) * class_tr[i];
+        }
+        normalize_probs4(raw, tr.est.class_probs);
+    }
+
+    const double obs_z_var = std::max(cfg.min_meas_var, obs.z_var);
+    const double trk_z_var = std::max(cfg.min_meas_var, tr.est.z_var);
+    const double denom_z = obs_z_var + trk_z_var;
+    tr.est.z = (trk_z_var * obs.z + obs_z_var * tr.est.z) / denom_z;
+    tr.est.z_var = std::max(cfg.min_meas_var, (obs_z_var * trk_z_var) / denom_z);
+
+    tr.est.hits += 1;
+    tr.est.misses = 0;
+    tr.est.last_stamp = stamp;
+    tr.est.status = (tr.est.hits >= cfg.confirm_hits) ? 1 : 0;
+    tr.est.quality = clamp_d(
+        0.5 * tr.est.quality + 0.5 * clamp_d(obs.quality, 0.0, 1.0) * innovation_quality,
+        0.0, 1.0
+    );
+}
+
+}  // namespace
+
+FUSION_CPP_EXPORT void* cpp_tracker_create(const fusion_core_cpp::TrackerConfigC* cfg) {
+    if (!cfg) return nullptr;
+    auto* inst = new TrackerInstance();
+    inst->cfg = *cfg;
+    return static_cast<void*>(inst);
+}
+
+FUSION_CPP_EXPORT void cpp_tracker_destroy(void* handle) {
+    if (!handle) return;
+    delete static_cast<TrackerInstance*>(handle);
+}
+
+FUSION_CPP_EXPORT void cpp_tracker_reset(void* handle) {
+    if (!handle) return;
+    auto* inst = static_cast<TrackerInstance*>(handle);
+    inst->tracks.clear();
+    inst->next_track_id = 1;
+    inst->last_step_stamp = -1.0;
+}
+
+FUSION_CPP_EXPORT int32_t cpp_tracker_get_tracks(
+    const void* handle,
+    fusion_core_cpp::TrackEstimateC* out_tracks,
+    int32_t max_tracks
+) {
+    if (!handle || !out_tracks || max_tracks <= 0) return 0;
+    const auto* inst = static_cast<const TrackerInstance*>(handle);
+    const int32_t n = std::min(static_cast<int32_t>(inst->tracks.size()), max_tracks);
+    for (int32_t i = 0; i < n; ++i) {
+        out_tracks[i] = inst->tracks[static_cast<size_t>(i)].est;
+    }
+    return n;
+}
+
+FUSION_CPP_EXPORT int32_t cpp_tracker_step(
+    void* handle,
+    double stamp,
+    const fusion_core_cpp::EgoMotionC* ego,
+    int32_t n_obs,
+    const fusion_core_cpp::Observation2DC* obs,
+    fusion_core_cpp::TrackEstimateC* out_tracks,
+    int32_t max_tracks,
+    fusion_core_cpp::TrackEstimateC* out_lost_tracks,
+    int32_t max_lost_tracks,
+    fusion_core_cpp::TrackerStepStatsC* out_stats
+) {
+    if (!handle) return 0;
+    auto* inst = static_cast<TrackerInstance*>(handle);
+    const auto& cfg = inst->cfg;
+
+    fusion_core_cpp::TrackerStepStatsC stats{};
+    if (stamp < inst->last_step_stamp) {
+        if (out_stats) *out_stats = stats;
+        return cpp_tracker_get_tracks(handle, out_tracks, max_tracks);
+    }
+
+    const double prev_step_stamp = inst->last_step_stamp;
+    inst->last_step_stamp = stamp;
+
+    for (auto& tr : inst->tracks) {
+        predict_track_c(tr, stamp, prev_step_stamp, ego, cfg);
+    }
+
+    const int32_t n_tracks = static_cast<int32_t>(inst->tracks.size());
+    struct CandidateC {
+        double cost;
+        int32_t tr_idx;
+        int32_t obs_idx;
+        double d2;
+    };
+    std::vector<CandidateC> candidates;
+    if (n_tracks > 0 && n_obs > 0 && obs != nullptr) {
+        std::vector<double> obs_probs(static_cast<size_t>(n_obs) * 4);
+        std::vector<double> obs_r00(static_cast<size_t>(n_obs));
+        std::vector<double> obs_r11(static_cast<size_t>(n_obs));
+        for (int32_t o = 0; o < n_obs; ++o) {
+            normalize_probs4(obs[o].class_probs, &obs_probs[static_cast<size_t>(o) * 4]);
+            obs_r00[static_cast<size_t>(o)] = std::max(cfg.min_meas_var, obs[o].cov_xx);
+            obs_r11[static_cast<size_t>(o)] = std::max(cfg.min_meas_var, obs[o].cov_yy);
+        }
+
+        for (int32_t t = 0; t < n_tracks; ++t) {
+            const auto& tr = inst->tracks[static_cast<size_t>(t)].est;
+            const double tx = tr.state[0], ty = tr.state[1];
+            const double p00 = tr.covariance[0], p01 = tr.covariance[1];
+            const double p10 = tr.covariance[4], p11 = tr.covariance[5];
+            double tp[4];
+            normalize_probs4(tr.class_probs, tp);
+
+            for (int32_t o = 0; o < n_obs; ++o) {
+                const double y0 = obs[o].x - tx;
+                const double y1 = obs[o].y - ty;
+                const double s00 = p00 + obs_r00[static_cast<size_t>(o)];
+                const double s11 = p11 + obs_r11[static_cast<size_t>(o)];
+                const double s01 = p01 + obs[o].cov_xy;
+                const double s10 = p10 + obs[o].cov_xy;
+                const double det = s00 * s11 - s01 * s10;
+                if (std::abs(det) < 1e-9) continue;
+                double d2 = (y0 * (s11 * y0 - s01 * y1) + y1 * (-s10 * y0 + s00 * y1)) / det;
+                if (d2 < 0.0) d2 = 0.0;
+                if (d2 <= cfg.mahalanobis_gate) {
+                    const double* op = &obs_probs[static_cast<size_t>(o) * 4];
+                    const double sem_ov = std::min(tp[0], op[0]) + std::min(tp[1], op[1]) +
+                                          std::min(tp[2], op[2]) + std::min(tp[3], op[3]);
+                    if (sem_ov >= cfg.semantic_min_overlap) {
+                        const double cost = d2 + cfg.semantic_cost_weight * (1.0 - sem_ov);
+                        candidates.push_back({cost, t, o, d2});
+                        ++stats.assoc_candidates;
+                    }
+                }
+            }
+        }
+    }
+
+    struct MatchC {
+        int32_t tr_idx;
+        int32_t obs_idx;
+        double d2;
+    };
+    std::vector<MatchC> matches;
+    std::vector<uint8_t> track_matched(static_cast<size_t>(n_tracks), 0);
+    std::vector<uint8_t> obs_matched(static_cast<size_t>(std::max(0, n_obs)), 0);
+
+    if (!candidates.empty()) {
+        if (cfg.assignment_hungarian != 0 && n_tracks > 1 && n_obs > 1) {
+            constexpr double kDisallowed = 1e6;
+            const size_t n_cells = static_cast<size_t>(n_tracks) * static_cast<size_t>(n_obs);
+            std::vector<double> cost_mat(n_cells, kDisallowed);
+            std::vector<double> d2_mat(n_cells, 0.0);
+            std::vector<uint8_t> valid_mat(n_cells, 0);
+            for (const auto& c : candidates) {
+                const size_t idx = static_cast<size_t>(c.tr_idx) * static_cast<size_t>(n_obs) +
+                                   static_cast<size_t>(c.obs_idx);
+                cost_mat[idx] = c.cost;
+                d2_mat[idx] = c.d2;
+                valid_mat[idx] = 1;
+            }
+            auto sol = solve_hungarian_min_cost(n_tracks, n_obs, cost_mat);
+            for (int32_t t = 0; t < n_tracks; ++t) {
+                const int32_t o = sol[static_cast<size_t>(t)];
+                if (o >= 0 && o < n_obs) {
+                    const size_t idx = static_cast<size_t>(t) * static_cast<size_t>(n_obs) +
+                                       static_cast<size_t>(o);
+                    if (valid_mat[idx] != 0) {
+                        matches.push_back({t, o, d2_mat[idx]});
+                        track_matched[static_cast<size_t>(t)] = 1;
+                        obs_matched[static_cast<size_t>(o)] = 1;
+                    }
+                }
+            }
+        } else {
+            std::stable_sort(candidates.begin(), candidates.end(),
+                             [](const CandidateC& a, const CandidateC& b) {
+                                 return a.cost < b.cost;
+                             });
+            for (const auto& c : candidates) {
+                if (track_matched[static_cast<size_t>(c.tr_idx)] != 0 ||
+                    obs_matched[static_cast<size_t>(c.obs_idx)] != 0) {
+                    continue;
+                }
+                track_matched[static_cast<size_t>(c.tr_idx)] = 1;
+                obs_matched[static_cast<size_t>(c.obs_idx)] = 1;
+                matches.push_back({c.tr_idx, c.obs_idx, c.d2});
+            }
+        }
+    }
+
+    stats.assoc_matches = static_cast<int32_t>(matches.size());
+    for (const auto& m : matches) {
+        update_track_c(inst->tracks[static_cast<size_t>(m.tr_idx)],
+                       obs[m.obs_idx], stamp, m.d2, ego, cfg);
+    }
+
+    std::vector<TrackInternal> surviving;
+    surviving.reserve(inst->tracks.size());
+    int32_t lost_count = 0;
+    for (int32_t t = 0; t < n_tracks; ++t) {
+        auto tr = inst->tracks[static_cast<size_t>(t)];
+        if (track_matched[static_cast<size_t>(t)] == 0) {
+            tr.est.misses += 1;
+            tr.est.quality = clamp_d(tr.est.quality * 0.92, 0.0, 1.0);
+            if (tr.est.misses > cfg.max_missed) {
+                tr.est.status = 2;
+                if (out_lost_tracks != nullptr && lost_count < max_lost_tracks) {
+                    out_lost_tracks[lost_count] = tr.est;
+                }
+                ++lost_count;
+                ++stats.tracks_deleted;
+                continue;
+            }
+            ++stats.assoc_rejects;
+        }
+        surviving.push_back(tr);
+    }
+    stats.n_lost_tracks = lost_count;
+    inst->tracks.swap(surviving);
+
+    const double vel_var = (cfg.motion_model_landmark != 0) ? 0.25 : 2.0;
+    const double prior_base = std::max(0.05, 0.25 * cfg.dirichlet_prior_strength);
+    for (int32_t o = 0; o < n_obs; ++o) {
+        if (obs_matched[static_cast<size_t>(o)] != 0) continue;
+        TrackInternal nt{};
+        nt.est.track_id = inst->next_track_id++;
+        double vx_init = 0.0, vy_init = 0.0;
+        if (cfg.motion_model_landmark != 0 && ego != nullptr && ego->has_motion != 0) {
+            vx_init = -ego->vx + ego->wz * obs[o].y;
+            vy_init = -ego->vy - ego->wz * obs[o].x;
+        }
+        nt.est.state[0] = obs[o].x;
+        nt.est.state[1] = obs[o].y;
+        nt.est.state[2] = vx_init;
+        nt.est.state[3] = vy_init;
+        nt.est.covariance[0] = std::max(cfg.min_meas_var, obs[o].cov_xx);
+        nt.est.covariance[1] = obs[o].cov_xy;
+        nt.est.covariance[4] = obs[o].cov_xy;
+        nt.est.covariance[5] = std::max(cfg.min_meas_var, obs[o].cov_yy);
+        nt.est.covariance[10] = vel_var;
+        nt.est.covariance[15] = vel_var;
+        nt.est.z = obs[o].z;
+        nt.est.z_var = std::max(cfg.min_meas_var, obs[o].z_var);
+
+        double norm_p[4];
+        normalize_probs4(obs[o].class_probs, norm_p);
+        const double info = normalized_information4(norm_p);
+        const double init_w = cfg.dirichlet_evidence_scale * clamp_d(obs[o].quality, 0.1, 1.0) * info;
+        double sum_a = 0.0;
+        for (int k = 0; k < 4; ++k) {
+            nt.est.class_probs[k] = norm_p[k];
+            nt.dirichlet_alpha[k] = prior_base + init_w * norm_p[k];
+            sum_a += nt.dirichlet_alpha[k];
+        }
+        nt.est.hits = 1;
+        nt.est.misses = 0;
+        nt.est.quality = clamp_d(obs[o].quality, 0.0, 1.0);
+        nt.est.status = 0;
+        nt.est.first_stamp = stamp;
+        nt.est.last_stamp = stamp;
+        nt.est.semantic_certainty = sum_a;
+        inst->tracks.push_back(nt);
+        ++stats.tracks_created;
+    }
+
+    if (out_stats) *out_stats = stats;
+    return cpp_tracker_get_tracks(handle, out_tracks, max_tracks);
+}

@@ -106,7 +106,34 @@ fusion_node:
     global_map_min_lap_distance_m: 40.0
     enable_lidar_stripe_semantics: true
     enable_corridor_output: false
+    corridor_markers_topic: /perception/corridor_markers
+    corridor_path_topic: /perception/corridor_path
+    corridor_horizon_m: 20.0
+    corridor_step_m: 1.0
     enable_debug_viz: false
+    debug_markers_topic: /perception/debug_markers
+    debug_reprojection_topic: /perception/debug_reprojection
+    enable_online_calibration: false
+    online_calibration_window_frames: 30
+    online_calibration_min_pairs: 12
+    online_calibration_apply_extrinsics: false
+    secondary_camera_topic: ""
+    enable_camera_info_intrinsics: true
+    camera_info_topic: /camera/camera_info
+    secondary_camera_info_topic: ""
+    camera_profiles_json: ""
+    secondary_camera_fx: 0.0
+    secondary_camera_fy: 0.0
+    secondary_camera_cx: 0.0
+    secondary_camera_cy: 0.0
+    secondary_lidar_to_camera_tx_m: 0.0
+    secondary_lidar_to_camera_ty_m: 0.0
+    secondary_lidar_to_camera_tz_m: 0.0
+    secondary_lidar_to_camera_roll_rad: 0.0
+    secondary_lidar_to_camera_pitch_rad: 0.0
+    secondary_lidar_to_camera_yaw_rad: 0.0
+    lidar_topics_extra: [""]
+    lidar_profiles_json: ""
 
     quality_warn_threshold: 0.4
     quality_critical_threshold: 0.2

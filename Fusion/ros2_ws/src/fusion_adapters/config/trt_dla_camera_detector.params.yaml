@@ -1,0 +1,19 @@
+onnx_camera_detector:
+  ros__parameters:
+    # Empty = bundled fusion_adapters/models/nano.onnx (YOLO26n, 4 FS cone classes, 768x480 input).
+    model_path: ""
+    image_topic: /zedx/zed_node/left/image_rect_color
+    compressed: false
+    output_topic: /camera/cone_detections
+    conf_threshold: 0.30
+    auto_rotate: false
+    intra_op_threads: 4
+    image_quality: 1.0
+
+    # Jetson Orin AGX TensorRT / NVDLA execution configuration
+    backend: tensorrt
+    enable_fp16: true
+    enable_int8: false
+    enable_dla: true
+    dla_core: 0
+    engine_cache_dir: /tmp/trt_cache

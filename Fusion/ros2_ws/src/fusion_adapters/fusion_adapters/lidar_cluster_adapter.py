@@ -331,7 +331,9 @@ class LidarClusterAdapter(Node):
         out = LidarConeClusters()
         markers = _safe_getattr(msg, "markers", [])
         if markers:
-            out.header = _safe_getattr(markers[0], "header", _HeaderStub())
+            hdr = _safe_getattr(markers[0], "header", None)
+            if hdr is not None:
+                out.header = hdr
         out.lidar_quality = 1.0
 
         for m in markers:

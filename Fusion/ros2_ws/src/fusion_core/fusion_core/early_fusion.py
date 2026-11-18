@@ -1,8 +1,28 @@
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
 import math
 from typing import Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+
+try:
+    from .cpp_bridge import (
+        CameraIntrinsicsC,
+        ClusterInputC,
+        ClusterSemanticC,
+        Detection2DC,
+        ExtrinsicsC,
+        get_cpp_kernels,
+    )
+except ImportError:  # pragma: no cover - direct module import fallback
+    from fusion_core.cpp_bridge import (  # type: ignore[no-redef]
+        CameraIntrinsicsC,
+        ClusterInputC,
+        ClusterSemanticC,
+        Detection2DC,
+        ExtrinsicsC,
+        get_cpp_kernels,
+    )
 
 try:
     import numpy as np
@@ -498,6 +518,97 @@ class EarlyFusionProjector:
                 for c_pos, c_cov in clusters_lidar
             ]
 
+        cpp_lib = get_cpp_kernels()
+        if cpp_lib is not None:
+            fb_norm = _normalize_probs(fallback_probs)
+            c_intr = CameraIntrinsicsC(
+                float(self.intrinsics.fx),
+                float(self.intrinsics.fy),
+                float(self.intrinsics.cx),
+                float(self.intrinsics.cy),
+                int(self.intrinsics.width),
+                int(self.intrinsics.height),
+                float(self.intrinsics.k1),
+                float(self.intrinsics.k2),
+                float(self.intrinsics.p1),
+                float(self.intrinsics.p2),
+                float(self.intrinsics.k3),
+            )
+            flat_r = [float(v) for row in self.extrinsics.rotation for v in row]
+            c_ext = ExtrinsicsC(
+                (ctypes.c_double * 9)(*flat_r),
+                (ctypes.c_double * 3)(*[float(v) for v in self.extrinsics.translation]),
+                float(self.min_depth_m),
+                float(self.max_depth_m),
+                float(self.sample_radius_scale),
+                float(self.min_semantic_weight),
+                float(self.no_match_semantic_weight),
+                1 if self.soft_likelihood_enabled else 0,
+                float(self.soft_likelihood_sigma_scale),
+                float(self.soft_likelihood_min_value),
+                float(self.soft_likelihood_outside_ratio),
+                1 if self.enable_frustum_hull_sampling else 0,
+            )
+            c_clusters = (ClusterInputC * n_clusters)()
+            for i, (c_pos, c_cov) in enumerate(clusters_lidar):
+                if len(c_cov) != 9 or all(abs(float(v)) < 1e-12 for v in c_cov):
+                    cxx, cyy, czz = 0.05, 0.05, 0.1
+                else:
+                    cxx, cyy, czz = float(c_cov[0]), float(c_cov[4]), float(c_cov[8])
+                c_clusters[i] = ClusterInputC(
+                    float(c_pos[0]), float(c_pos[1]), float(c_pos[2]), cxx, cyy, czz
+                )
+            c_dets = (Detection2DC * n_dets)()
+            for i, det in enumerate(detections):
+                dp = _normalize_probs(det.class_probs)
+                c_dets[i] = Detection2DC(
+                    float(det.xmin),
+                    float(det.ymin),
+                    float(det.xmax),
+                    float(det.ymax),
+                    (ctypes.c_double * 4)(dp[0], dp[1], dp[2], dp[3]),
+                    float(det.confidence),
+                )
+            c_fb = (ctypes.c_double * 4)(fb_norm[0], fb_norm[1], fb_norm[2], fb_norm[3])
+            c_out = (ClusterSemanticC * n_clusters)()
+            n_ret = cpp_lib.cpp_estimate_batch_semantics(
+                n_clusters,
+                c_clusters,
+                n_dets,
+                c_dets,
+                ctypes.byref(c_intr),
+                ctypes.byref(c_ext),
+                c_fb,
+                c_out,
+            )
+            if n_ret == n_clusters:
+                out_list: List[ClusterSemanticEstimate] = []
+                for i in range(n_clusters):
+                    r = c_out[i]
+                    matched_idx = None if r.matched_detection_idx < 0 else int(r.matched_detection_idx)
+                    out_list.append(
+                        ClusterSemanticEstimate(
+                            class_probs=[
+                                float(r.class_probs[0]),
+                                float(r.class_probs[1]),
+                                float(r.class_probs[2]),
+                                float(r.class_probs[3]),
+                            ],
+                            semantic_weight=float(r.semantic_weight),
+                            diagnostics=ProjectionDiagnostics(
+                                projected_samples=int(r.projected_samples),
+                                matched_samples=int(r.matched_samples),
+                                matched_weight_sum=float(r.matched_weight_sum),
+                                best_confidence=float(r.best_confidence),
+                                residual_samples=int(r.residual_samples),
+                                residual_sum_px=float(r.residual_sum_px),
+                                residual_max_px=float(r.residual_max_px),
+                                matched_detection_idx=matched_idx,
+                            ),
+                        )
+                    )
+                return out_list
+
         disallowed_cost = 1e6
         pair_scores: Dict[Tuple[int, int], float] = {}
         for c_idx, (c_pos, c_cov) in enumerate(clusters_lidar):
@@ -799,3 +910,195 @@ class EarlyFusionProjector:
         if value < self.soft_likelihood_min_value:
             return 0.0
         return float(_clamp(value, 0.0, 1.0))
+
+
+@dataclass
+class CameraSensorProfile:
+    """Calibration and topic configuration for a single camera sensor in an N-camera rig."""
+
+    camera_id: str
+    topic: str
+    frame_id: str
+    projector: EarlyFusionProjector
+    use_tf_extrinsics: bool = False
+    camera_info_topic: str = ""
+
+
+class MultiCameraEarlyFusion:
+    """Multi-camera semantic painter and cross-camera frustum recovery coordinator."""
+
+    def __init__(self, profiles: Optional[Dict[str, CameraSensorProfile]] = None) -> None:
+        self.profiles: Dict[str, CameraSensorProfile] = dict(profiles) if profiles else {}
+        self.last_matched_indices_by_cam: Dict[str, List[int]] = {}
+
+    def register_camera(self, profile: CameraSensorProfile) -> None:
+        self.profiles[profile.camera_id] = profile
+
+    def estimate_batch_multi_camera_semantics(
+        self,
+        clusters_lidar_by_cam: Dict[
+            str, Sequence[Tuple[Tuple[float, float, float], Sequence[float]]]
+        ],
+        detections_by_cam: Dict[str, List[DetectionRecord]],
+        fallback_probs: Sequence[float],
+    ) -> List[ClusterSemanticEstimate]:
+        """Fuse per-camera Hungarian semantic estimates across N cameras per 3D cluster."""
+        fallback = _normalize_probs(fallback_probs)
+        n_clusters = 0
+        for clusters in clusters_lidar_by_cam.values():
+            n_clusters = len(clusters)
+            break
+        if n_clusters == 0:
+            self.last_matched_indices_by_cam = {}
+            return []
+
+        per_cam_estimates: Dict[str, List[ClusterSemanticEstimate]] = {}
+        matched_by_cam: Dict[str, List[int]] = {}
+        for cam_id, profile in self.profiles.items():
+            dets = detections_by_cam.get(cam_id, [])
+            clusters = clusters_lidar_by_cam.get(cam_id, [])
+            if not clusters or not dets:
+                continue
+            ests = profile.projector.estimate_batch_cluster_semantics(
+                clusters_lidar=clusters,
+                detections=dets,
+                fallback_probs=fallback,
+            )
+            per_cam_estimates[cam_id] = ests
+            matched_by_cam[cam_id] = [
+                int(est.diagnostics.matched_detection_idx)
+                for est in ests
+                if est.diagnostics.matched_detection_idx is not None
+            ]
+
+        self.last_matched_indices_by_cam = matched_by_cam
+        if not per_cam_estimates:
+            return [
+                ClusterSemanticEstimate(
+                    class_probs=fallback,
+                    semantic_weight=0.6,
+                    diagnostics=ProjectionDiagnostics(
+                        projected_samples=0,
+                        matched_samples=0,
+                        matched_weight_sum=0.0,
+                        best_confidence=0.0,
+                        residual_samples=0,
+                        residual_sum_px=0.0,
+                        residual_max_px=0.0,
+                        matched_detection_idx=None,
+                    ),
+                )
+                for _ in range(n_clusters)
+            ]
+
+        fused: List[ClusterSemanticEstimate] = []
+        for c_idx in range(n_clusters):
+            matched_ests: List[ClusterSemanticEstimate] = []
+            unmatched_ests: List[ClusterSemanticEstimate] = []
+            for ests in per_cam_estimates.values():
+                if c_idx < len(ests):
+                    est = ests[c_idx]
+                    if est.diagnostics.matched_detection_idx is not None:
+                        matched_ests.append(est)
+                    else:
+                        unmatched_ests.append(est)
+
+            if not matched_ests:
+                # Pick the estimate with the highest projected sample count or first available
+                best_unmatched = max(
+                    unmatched_ests,
+                    key=lambda e: (e.diagnostics.projected_samples, e.semantic_weight),
+                )
+                fused.append(best_unmatched)
+                continue
+
+            if len(matched_ests) == 1:
+                fused.append(matched_ests[0])
+                continue
+
+            # Weighted combination across multiple cameras seeing the same 3D cone
+            acc = [0.0, 0.0, 0.0, 0.0]
+            w_total = 0.0
+            proj_samples = 0
+            matched_samples = 0
+            weight_sum = 0.0
+            best_conf = 0.0
+            res_samples = 0
+            res_sum = 0.0
+            res_max = 0.0
+            best_sem_w = 0.0
+            best_det_idx: Optional[int] = None
+
+            for est in matched_ests:
+                w = max(1e-4, float(est.semantic_weight) * max(0.1, float(est.diagnostics.best_confidence)))
+                for k in range(4):
+                    acc[k] += w * float(est.class_probs[k])
+                w_total += w
+                proj_samples += int(est.diagnostics.projected_samples)
+                matched_samples += int(est.diagnostics.matched_samples)
+                weight_sum += float(est.diagnostics.matched_weight_sum)
+                if est.diagnostics.best_confidence > best_conf:
+                    best_conf = float(est.diagnostics.best_confidence)
+                    best_det_idx = est.diagnostics.matched_detection_idx
+                res_samples += int(est.diagnostics.residual_samples)
+                res_sum += float(est.diagnostics.residual_sum_px)
+                res_max = max(res_max, float(est.diagnostics.residual_max_px))
+                best_sem_w = max(best_sem_w, float(est.semantic_weight))
+
+            fused_probs = _normalize_probs([v / max(1e-9, w_total) for v in acc])
+            fused.append(
+                ClusterSemanticEstimate(
+                    class_probs=fused_probs,
+                    semantic_weight=float(_clamp(best_sem_w, 0.0, 1.0)),
+                    diagnostics=ProjectionDiagnostics(
+                        projected_samples=proj_samples,
+                        matched_samples=matched_samples,
+                        matched_weight_sum=weight_sum,
+                        best_confidence=best_conf,
+                        residual_samples=res_samples,
+                        residual_sum_px=res_sum,
+                        residual_max_px=res_max,
+                        matched_detection_idx=best_det_idx,
+                    ),
+                )
+            )
+        return fused
+
+    def recover_multi_camera_unmatched_detections(
+        self,
+        detections_by_cam: Dict[str, List[DetectionRecord]],
+        matched_indices_by_cam: Dict[str, Sequence[int]],
+        existing_positions: Sequence[Tuple[float, float, float]],
+        cone_height_m: float = 0.32,
+        big_orange_height_m: float = 0.505,
+        min_confidence: float = 0.55,
+        min_bbox_height_px: float = 8.0,
+        min_depth_m: float = 3.0,
+        max_depth_m: float = 35.0,
+        dedup_radius_m: float = 1.2,
+    ) -> Dict[str, List[FrustumRecoveredCone]]:
+        """Recover unmatched 2D detections across N cameras while deduplicating across views."""
+        occupied: List[Tuple[float, float, float]] = list(existing_positions)
+        recovered_by_cam: Dict[str, List[FrustumRecoveredCone]] = {}
+        for cam_id, profile in self.profiles.items():
+            dets = detections_by_cam.get(cam_id, [])
+            if not dets:
+                continue
+            matched = matched_indices_by_cam.get(cam_id, [])
+            rec_list = profile.projector.recover_unmatched_detections(
+                detections=dets,
+                matched_detection_indices=matched,
+                existing_positions=occupied,
+                cone_height_m=cone_height_m,
+                big_orange_height_m=big_orange_height_m,
+                min_confidence=min_confidence,
+                min_bbox_height_px=min_bbox_height_px,
+                min_depth_m=min_depth_m,
+                max_depth_m=max_depth_m,
+                dedup_radius_m=dedup_radius_m,
+            )
+            if rec_list:
+                recovered_by_cam[cam_id] = rec_list
+                for rc in rec_list:
+                    occupied.append(rc.position)
+        return recovered_by_cam

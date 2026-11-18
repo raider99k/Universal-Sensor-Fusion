@@ -26,9 +26,10 @@ find_package(rclcpp QUIET)
 find_package(rclcpp_components QUIET)
 find_package(sensor_msgs QUIET)
 find_package(nav_msgs QUIET)
+find_package(diagnostic_msgs QUIET)
 find_package(fusion_interfaces QUIET)
 
-if(ament_cmake_FOUND AND rclcpp_FOUND AND rclcpp_components_FOUND AND sensor_msgs_FOUND AND fusion_interfaces_FOUND)
+if(ament_cmake_FOUND AND rclcpp_FOUND AND rclcpp_components_FOUND AND sensor_msgs_FOUND AND nav_msgs_FOUND AND diagnostic_msgs_FOUND AND fusion_interfaces_FOUND)
   add_library(ouster_lidar_cpp_component SHARED
     src/fusion_composable_node.cpp
   )
@@ -36,19 +37,35 @@ if(ament_cmake_FOUND AND rclcpp_FOUND AND rclcpp_components_FOUND AND sensor_msg
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
   )
-  target_link_libraries(ouster_lidar_cpp_component
+  target_link_libraries(ouster_lidar_cpp_component PUBLIC
     fusion_fast_kernels
   )
-  ament_target_dependencies(ouster_lidar_cpp_component
-    rclcpp
-    rclcpp_components
-    sensor_msgs
-    nav_msgs
-    fusion_interfaces
-  )
+  if(TARGET rclcpp::rclcpp AND TARGET rclcpp_components::component AND DEFINED fusion_interfaces_TARGETS)
+    target_link_libraries(ouster_lidar_cpp_component PUBLIC
+      rclcpp::rclcpp
+      rclcpp_components::component
+      ${sensor_msgs_TARGETS}
+      ${nav_msgs_TARGETS}
+      ${diagnostic_msgs_TARGETS}
+      ${fusion_interfaces_TARGETS}
+    )
+  elseif(COMMAND ament_target_dependencies)
+    ament_target_dependencies(ouster_lidar_cpp_component
+      rclcpp
+      rclcpp_components
+      sensor_msgs
+      nav_msgs
+      diagnostic_msgs
+      fusion_interfaces
+    )
+  endif()
   rclcpp_components_register_node(ouster_lidar_cpp_component
     PLUGIN "fusion_core_cpp::OusterLidarComposableNode"
     EXECUTABLE ouster_lidar_cpp_node
+  )
+  rclcpp_components_register_node(ouster_lidar_cpp_component
+    PLUGIN "fusion_core_cpp::FusionCoreComposableNode"
+    EXECUTABLE fusion_core_cpp_node
   )
 
   install(TARGETS fusion_fast_kernels ouster_lidar_cpp_component
