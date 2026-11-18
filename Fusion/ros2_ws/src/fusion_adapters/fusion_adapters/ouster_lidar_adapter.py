@@ -433,6 +433,9 @@ class OusterLidarAdapter(Node):
             ("cone_min_height_m", 0.05),
             ("cone_max_height_m", 0.80),
             ("cone_max_radius_m", 0.40),
+            ("enable_cluster_splitting", True),
+            ("split_max_radius_m", 0.95),
+            ("split_min_separation_m", 0.28),
             ("covariance_floor_xy", 0.03),
             ("covariance_floor_z", 0.05),
             ("quality_ref_points", 4000),
@@ -590,6 +593,15 @@ class OusterLidarAdapter(Node):
         self.cone_min_height_m = float(self.get_parameter("cone_min_height_m").value)
         self.cone_max_height_m = float(self.get_parameter("cone_max_height_m").value)
         self.cone_max_radius_m = float(self.get_parameter("cone_max_radius_m").value)
+        self.enable_cluster_splitting = bool(
+            self.get_parameter("enable_cluster_splitting").value
+        )
+        self.split_max_radius_m = float(
+            self.get_parameter("split_max_radius_m").value
+        )
+        self.split_min_separation_m = float(
+            self.get_parameter("split_min_separation_m").value
+        )
         self.covariance_floor_xy = float(self.get_parameter("covariance_floor_xy").value)
         self.covariance_floor_z = float(self.get_parameter("covariance_floor_z").value)
         self.quality_ref_points = int(self.get_parameter("quality_ref_points").value)
@@ -1947,6 +1959,9 @@ class OusterLidarAdapter(Node):
                 surface_axis_offset_m=float(getattr(self, "surface_axis_offset_m", 0.045)),
                 enable_stripe_classification=1 if getattr(self, "enable_stripe_classification", True) else 0,
                 has_refl=1 if krefl is not None else 0,
+                enable_cluster_splitting=1 if getattr(self, "enable_cluster_splitting", True) else 0,
+                split_max_radius_m=float(getattr(self, "split_max_radius_m", 0.95)),
+                split_min_separation_m=float(getattr(self, "split_min_separation_m", 0.28)),
             )
             max_cls = 192
             desc_arr = (ClusterDescriptorC * max_cls)()
@@ -2015,6 +2030,11 @@ class OusterLidarAdapter(Node):
         ref_r = float(getattr(self, "adaptive_range_ref_m", 12.0))
         min_any_pts = min(base_min_pts, far_min_pts)
 
+        do_split = bool(getattr(self, "enable_cluster_splitting", True))
+        split_max_r = float(getattr(self, "split_max_radius_m", 0.95))
+        split_min_sep = float(getattr(self, "split_min_separation_m", 0.28))
+        comp_max_pts = (2 * max_pts) if do_split else max_pts
+
         lbl_counts = np.bincount(pt_lbl, minlength=n_comp + 1)
         near_gate_r2 = max(0.0, ref_r - 0.5) ** 2
         keep_pt = (
@@ -2024,7 +2044,7 @@ class OusterLidarAdapter(Node):
                 & (lbl_counts[pt_lbl] >= far_min_pts)
                 & ((kx * kx + ky * ky) >= near_gate_r2)
             )
-        ) & (lbl_counts[pt_lbl] <= max_pts)
+        ) & (lbl_counts[pt_lbl] <= comp_max_pts)
         if not np.any(keep_pt):
             return []
         pt_lbl_k = pt_lbl[keep_pt]
@@ -2110,48 +2130,145 @@ class OusterLidarAdapter(Node):
                 if (is_far and n < base_min_pts and rad <= min(c_max_r, 0.15))
                 else c_min_h
             )
-            if h_val < eff_min_h or h_val > c_max_h or rad > c_max_r:
-                continue
-            size_score = _clamp(
-                (n - eff_min_pts) / max(1.0, float(max_pts - eff_min_pts)),
-                0.0,
-                1.0,
-            )
-            compact_score = _clamp(1.0 - rad / max(0.05, c_max_r), 0.0, 1.0)
-            height_score = (
-                0.65
-                if (is_far and n < base_min_pts)
-                else _clamp(1.0 - abs(h_val - 0.35) / 0.35, 0.0, 1.0)
-            )
-            geom_q = _clamp(
-                0.45 * size_score + 0.35 * compact_score + 0.20 * height_score,
-                0.0,
-                1.0,
-            )
-            cx_o = float(xm[k])
-            cy_o = float(ym[k])
-            if use_off and d_xy > 0.5:
-                cx_o += axis_off * (cx_o / d_xy)
-                cy_o += axis_off * (cy_o / d_xy)
-            cl = LidarConeCluster()
-            cl.centroid = Point(x=cx_o, y=cy_o, z=float(zm[k]))
-            cl.covariance = [
-                float(var_x[k]),
-                float(cov_xy[k]),
-                0.0,
-                float(cov_xy[k]),
-                float(var_y[k]),
-                0.0,
-                0.0,
-                0.0,
-                float(var_z[k]),
-            ]
-            cl.geometry_quality = float(geom_q)
-            cl.point_count = n
-            sr_val = float(stripe_ratios[k])
-            _assign_cluster_stripe_fields(cl, sr_val, blue_min_r, yellow_max_r)
-            out_handles.append(_ClusterIdxList(n, cl))
+            if n <= max_pts and eff_min_h <= h_val <= c_max_h and rad <= c_max_r:
+                size_score = _clamp(
+                    (n - eff_min_pts) / max(1.0, float(max_pts - eff_min_pts)),
+                    0.0,
+                    1.0,
+                )
+                compact_score = _clamp(1.0 - rad / max(0.05, c_max_r), 0.0, 1.0)
+                height_score = (
+                    0.65
+                    if (is_far and n < base_min_pts)
+                    else _clamp(1.0 - abs(h_val - 0.35) / 0.35, 0.0, 1.0)
+                )
+                geom_q = _clamp(
+                    0.45 * size_score + 0.35 * compact_score + 0.20 * height_score,
+                    0.0,
+                    1.0,
+                )
+                cx_o = float(xm[k])
+                cy_o = float(ym[k])
+                if use_off and d_xy > 0.5:
+                    cx_o += axis_off * (cx_o / d_xy)
+                    cy_o += axis_off * (cy_o / d_xy)
+                cl = LidarConeCluster()
+                cl.centroid = Point(x=cx_o, y=cy_o, z=float(zm[k]))
+                cl.covariance = [
+                    float(var_x[k]),
+                    float(cov_xy[k]),
+                    0.0,
+                    float(cov_xy[k]),
+                    float(var_y[k]),
+                    0.0,
+                    0.0,
+                    0.0,
+                    float(var_z[k]),
+                ]
+                cl.geometry_quality = float(geom_q)
+                cl.point_count = n
+                sr_val = float(stripe_ratios[k])
+                _assign_cluster_stripe_fields(cl, sr_val, blue_min_r, yellow_max_r)
+                out_handles.append(_ClusterIdxList(n, cl))
+            elif (
+                do_split
+                and eff_min_h <= h_val <= c_max_h
+                and c_max_r < rad <= split_max_r
+                and n >= 2 * eff_min_pts
+            ):
+                s0 = int(st_v[k])
+                s1 = s0 + n
+                sub_pts = list(zip(cx[s0:s1].tolist(), cy[s0:s1].tolist(), cz[s0:s1].tolist()))
+                sub_refl = crefl[s0:s1].tolist() if crefl is not None else None
+                split_pair = self._split_xy_two_cones(
+                    [(p[0], p[1]) for p in sub_pts], split_min_sep
+                )
+                if split_pair is not None:
+                    for half_idxs in split_pair:
+                        cl_sub = self._build_single_cone_from_lists(
+                            sub_pts, half_idxs, sub_refl
+                        )
+                        if cl_sub is not None:
+                            out_handles.append(_ClusterIdxList(int(cl_sub.point_count), cl_sub))
         return out_handles
+
+    @staticmethod
+    def _split_xy_two_cones(
+        xy_pts: Sequence[Tuple[float, float]],
+        min_separation_m: float,
+    ) -> Optional[Tuple[List[int], List[int]]]:
+        """Deterministic 2-means XY split for merged side-by-side cone components."""
+        n = len(xy_pts)
+        if n < 2:
+            return None
+        xm = sum(p[0] for p in xy_pts) / n
+        ym = sum(p[1] for p in xy_pts) / n
+        seed_a = max(range(n), key=lambda i: (xy_pts[i][0] - xm) ** 2 + (xy_pts[i][1] - ym) ** 2)
+        ax, ay = xy_pts[seed_a]
+        seed_b = max(range(n), key=lambda i: (xy_pts[i][0] - ax) ** 2 + (xy_pts[i][1] - ay) ** 2)
+        bx, by = xy_pts[seed_b]
+        if (bx - ax) ** 2 + (by - ay) ** 2 < min_separation_m * min_separation_m:
+            return None
+        for _ in range(6):
+            sax = say = sbx = sby = 0.0
+            ca = cb = 0
+            for x, y in xy_pts:
+                if (x - ax) ** 2 + (y - ay) ** 2 <= (x - bx) ** 2 + (y - by) ** 2:
+                    sax += x; say += y; ca += 1
+                else:
+                    sbx += x; sby += y; cb += 1
+            if ca == 0 or cb == 0:
+                return None
+            nax, nay = sax / ca, say / ca
+            nbx, nby = sbx / cb, sby / cb
+            conv = (
+                abs(nax - ax) < 1e-4
+                and abs(nay - ay) < 1e-4
+                and abs(nbx - bx) < 1e-4
+                and abs(nby - by) < 1e-4
+            )
+            ax, ay, bx, by = nax, nay, nbx, nby
+            if conv:
+                break
+        if math.hypot(ax - bx, ay - by) < min_separation_m:
+            return None
+        idx_a: List[int] = []
+        idx_b: List[int] = []
+        for i, (x, y) in enumerate(xy_pts):
+            if (x - ax) ** 2 + (y - ay) ** 2 <= (x - bx) ** 2 + (y - by) ** 2:
+                idx_a.append(i)
+            else:
+                idx_b.append(i)
+        return (idx_a, idx_b) if (idx_a and idx_b) else None
+
+    def _build_single_cone_from_lists(
+        self,
+        points: Sequence[Tuple[float, float, float]],
+        idxs: Sequence[int],
+        refl_vals: Optional[Sequence[float]] = None,
+    ) -> Optional[LidarConeCluster]:
+        cl = self._build_cluster(list(points), list(idxs))
+        if cl is None:
+            return None
+        if refl_vals is not None and getattr(self, "enable_stripe_classification", True):
+            n = len(idxs)
+            zs = [points[i][2] for i in idxs]
+            zmin, zmax = min(zs), max(zs)
+            h_val = zmax - zmin
+            sr_val = 1.0
+            if n >= 5 and h_val >= 0.08:
+                inv_h = 1.0 / max(1e-6, h_val)
+                mid_vals = [refl_vals[i] for i in idxs if 0.25 <= (points[i][2] - zmin) * inv_h <= 0.75]
+                out_vals = [refl_vals[i] for i in idxs if not (0.25 <= (points[i][2] - zmin) * inv_h <= 0.75)]
+                if mid_vals and out_vals and (sum(mid_vals) + sum(out_vals)) > 1.0:
+                    sr_val = (sum(mid_vals) / len(mid_vals)) / max(1.0, sum(out_vals) / len(out_vals))
+            _assign_cluster_stripe_fields(
+                cl,
+                sr_val,
+                float(getattr(self, "stripe_blue_min_ratio", 1.20)),
+                float(getattr(self, "stripe_yellow_max_ratio", 0.75)),
+            )
+        return cl
 
     def _cluster_points(self, points: List[Tuple[float, float, float]]) -> List[List[int]]:
         if isinstance(points, FastPointCloud) and (
@@ -2241,6 +2358,25 @@ class OusterLidarAdapter(Node):
                 if (cx * cx + cy * cy) >= ref_r2:
                     min_pts = far_min_pts
             if c_len >= min_pts:
+                do_split = bool(getattr(self, "enable_cluster_splitting", True))
+                if do_split and c_len >= 2 * min_pts:
+                    inv_c = 1.0 / c_len
+                    cx_m = sum_x * inv_c
+                    cy_m = sum_y * inv_c
+                    rad_sq = max(
+                        (points[idx][0] - cx_m) ** 2 + (points[idx][1] - cy_m) ** 2
+                        for idx in cluster
+                    )
+                    split_max_r = float(getattr(self, "split_max_radius_m", 0.95))
+                    if self.cone_max_radius_m < math.sqrt(rad_sq) <= split_max_r:
+                        split_pair = self._split_xy_two_cones(
+                            [(points[idx][0], points[idx][1]) for idx in cluster],
+                            float(getattr(self, "split_min_separation_m", 0.28)),
+                        )
+                        if split_pair is not None:
+                            clusters.append([cluster[i] for i in split_pair[0]])
+                            clusters.append([cluster[i] for i in split_pair[1]])
+                            continue
                 clusters.append(cluster)
 
         clusters.sort(key=len, reverse=True)

@@ -801,6 +801,10 @@ FUSION_CPP_EXPORT int32_t cpp_cluster_and_build(
     }
 
     const int32_t max_pts = cfg->max_cluster_points;
+    const bool do_split = (cfg->enable_cluster_splitting != 0);
+    const double split_max_r = (cfg->split_max_radius_m > 0.0) ? cfg->split_max_radius_m : 0.95;
+    const double split_min_sep = (cfg->split_min_separation_m > 0.0) ? cfg->split_min_separation_m : 0.28;
+    const int32_t comp_max_pts = do_split ? (2 * max_pts) : max_pts;
     const int32_t base_min_pts = cfg->min_cluster_points;
     const bool adaptive = (cfg->enable_adaptive_clustering != 0);
     const int32_t far_min_pts = adaptive ? std::max(1, cfg->min_cluster_points_far) : base_min_pts;
@@ -816,7 +820,7 @@ FUSION_CPP_EXPORT int32_t cpp_cluster_and_build(
         const int32_t cnt = comp_counts[l];
         const bool keep = ((cnt >= base_min_pts) ||
                            (adaptive && cnt >= far_min_pts && (kx[i] * kx[i] + ky[i] * ky[i]) >= near_gate_r2)) &&
-                          (cnt <= max_pts);
+                          (cnt <= comp_max_pts);
         if (keep) {
             next_pt[i] = comp_head[l];
             comp_head[l] = i;
@@ -832,6 +836,98 @@ FUSION_CPP_EXPORT int32_t cpp_cluster_and_build(
     const double c_min_h = cfg->cone_min_height_m;
     const double c_max_h = cfg->cone_max_height_m;
     const double c_max_r = cfg->cone_max_radius_m;
+
+    auto try_emit_cone = [&](const std::vector<int32_t>& idxs) -> bool {
+        const int32_t n = static_cast<int32_t>(idxs.size());
+        if (n <= 0 || n > max_pts) return false;
+        double sum_x = 0.0, sum_y = 0.0, sum_z = 0.0;
+        double zmin = std::numeric_limits<double>::infinity();
+        double zmax = -std::numeric_limits<double>::infinity();
+        for (int32_t cur : idxs) {
+            const double x = kx[cur];
+            const double y = ky[cur];
+            const double z = kz[cur];
+            sum_x += x; sum_y += y; sum_z += z;
+            if (z < zmin) zmin = z;
+            if (z > zmax) zmax = z;
+        }
+        const double xm = sum_x / n;
+        const double ym = sum_y / n;
+        const double zm = sum_z / n;
+        const double d_xy = std::hypot(xm, ym);
+        const bool is_far = adaptive && (d_xy >= ref_r);
+        const int32_t eff_min_pts = is_far ? far_min_pts : base_min_pts;
+        if (n < eff_min_pts) return false;
+
+        const double h_val = zmax - zmin;
+        double max_r2 = 0.0;
+        double sum_dx2 = 0.0, sum_dy2 = 0.0, sum_dz2 = 0.0, sum_dxy = 0.0;
+        double mid_sum = 0.0, out_sum = 0.0;
+        int32_t mid_cnt = 0, out_cnt = 0;
+        const double inv_h = 1.0 / std::max(1e-6, h_val);
+        for (int32_t cur : idxs) {
+            const double dx = kx[cur] - xm;
+            const double dy = ky[cur] - ym;
+            const double dz = kz[cur] - zm;
+            const double r2 = dx * dx + dy * dy;
+            if (r2 > max_r2) max_r2 = r2;
+            sum_dx2 += dx * dx;
+            sum_dy2 += dy * dy;
+            sum_dz2 += dz * dz;
+            sum_dxy += dx * dy;
+            if (has_refl) {
+                const double znorm = (kz[cur] - zmin) * inv_h;
+                if (znorm >= 0.25 && znorm <= 0.75) {
+                    mid_sum += krefl[cur];
+                    ++mid_cnt;
+                } else {
+                    out_sum += krefl[cur];
+                    ++out_cnt;
+                }
+            }
+        }
+        const double rad = std::sqrt(max_r2);
+        const double eff_min_h = (is_far && n < base_min_pts && rad <= std::min(c_max_r, 0.15)) ? 0.0 : c_min_h;
+        if (h_val < eff_min_h || h_val > c_max_h || rad > c_max_r) {
+            return false;
+        }
+        const double size_score = clamp_d(
+            static_cast<double>(n - eff_min_pts) / std::max(1.0, static_cast<double>(max_pts - eff_min_pts)),
+            0.0, 1.0
+        );
+        const double compact_score = clamp_d(1.0 - rad / std::max(0.05, c_max_r), 0.0, 1.0);
+        const double height_score = (is_far && n < base_min_pts)
+                                        ? 0.65
+                                        : clamp_d(1.0 - std::abs(h_val - 0.35) / 0.35, 0.0, 1.0);
+        const double geom_q = clamp_d(0.45 * size_score + 0.35 * compact_score + 0.20 * height_score, 0.0, 1.0);
+        double cx_o = xm;
+        double cy_o = ym;
+        if (use_off && d_xy > 0.5) {
+            cx_o += axis_off * (cx_o / d_xy);
+            cy_o += axis_off * (cy_o / d_xy);
+        }
+        double stripe_ratio = 1.0;
+        if (has_refl && n >= 5 && h_val >= 0.08 && mid_cnt >= 1 && out_cnt >= 1 && (mid_sum + out_sum) > 1.0) {
+            stripe_ratio = (mid_sum / mid_cnt) / std::max(1.0, out_sum / out_cnt);
+        }
+        valid_clusters.push_back({
+            cx_o,
+            cy_o,
+            zm,
+            std::max(cfg->covariance_floor_xy, sum_dx2 / n),
+            sum_dxy / n,
+            std::max(cfg->covariance_floor_xy, sum_dy2 / n),
+            std::max(cfg->covariance_floor_z, sum_dz2 / n),
+            geom_q,
+            stripe_ratio,
+            n
+        });
+        return true;
+    };
+
+    thread_local std::vector<int32_t> comp_pts;
+    thread_local std::vector<int32_t> split_a;
+    thread_local std::vector<int32_t> split_b;
 
     for (int32_t l = 1; l <= n_comp; ++l) {
         int32_t p = comp_head[l];
@@ -892,44 +988,96 @@ FUSION_CPP_EXPORT int32_t cpp_cluster_and_build(
 
         const double rad = std::sqrt(max_r2);
         const double eff_min_h = (is_far && n < base_min_pts && rad <= std::min(c_max_r, 0.15)) ? 0.0 : c_min_h;
-        if (h_val < eff_min_h || h_val > c_max_h || rad > c_max_r) {
+        if (n <= max_pts && h_val >= eff_min_h && h_val <= c_max_h && rad <= c_max_r) {
+            const double size_score = clamp_d(
+                static_cast<double>(n - eff_min_pts) / std::max(1.0, static_cast<double>(max_pts - eff_min_pts)),
+                0.0, 1.0
+            );
+            const double compact_score = clamp_d(1.0 - rad / std::max(0.05, c_max_r), 0.0, 1.0);
+            const double height_score = (is_far && n < base_min_pts)
+                                            ? 0.65
+                                            : clamp_d(1.0 - std::abs(h_val - 0.35) / 0.35, 0.0, 1.0);
+            const double geom_q = clamp_d(0.45 * size_score + 0.35 * compact_score + 0.20 * height_score, 0.0, 1.0);
+
+            double cx_o = xm;
+            double cy_o = ym;
+            if (use_off && d_xy > 0.5) {
+                cx_o += axis_off * (cx_o / d_xy);
+                cy_o += axis_off * (cy_o / d_xy);
+            }
+
+            double stripe_ratio = 1.0;
+            if (has_refl && n >= 5 && h_val >= 0.08 && mid_cnt >= 1 && out_cnt >= 1 && (mid_sum + out_sum) > 1.0) {
+                stripe_ratio = (mid_sum / mid_cnt) / std::max(1.0, out_sum / out_cnt);
+            }
+
+            valid_clusters.push_back({
+                cx_o,
+                cy_o,
+                zm,
+                std::max(cfg->covariance_floor_xy, sum_dx2 / n),
+                sum_dxy / n,
+                std::max(cfg->covariance_floor_xy, sum_dy2 / n),
+                std::max(cfg->covariance_floor_z, sum_dz2 / n),
+                geom_q,
+                stripe_ratio,
+                n
+            });
             continue;
         }
 
-        const double size_score = clamp_d(
-            static_cast<double>(n - eff_min_pts) / std::max(1.0, static_cast<double>(max_pts - eff_min_pts)),
-            0.0, 1.0
-        );
-        const double compact_score = clamp_d(1.0 - rad / std::max(0.05, c_max_r), 0.0, 1.0);
-        const double height_score = (is_far && n < base_min_pts)
-                                        ? 0.65
-                                        : clamp_d(1.0 - std::abs(h_val - 0.35) / 0.35, 0.0, 1.0);
-        const double geom_q = clamp_d(0.45 * size_score + 0.35 * compact_score + 0.20 * height_score, 0.0, 1.0);
-
-        double cx_o = xm;
-        double cy_o = ym;
-        if (use_off && d_xy > 0.5) {
-            cx_o += axis_off * (cx_o / d_xy);
-            cy_o += axis_off * (cy_o / d_xy);
+        // Targeted 2-means split only for oversized components that could represent 2 close cones.
+        if (do_split && h_val >= eff_min_h && h_val <= c_max_h &&
+            rad > c_max_r && rad <= split_max_r && n >= 2 * eff_min_pts) {
+            comp_pts.clear();
+            int32_t seed_a = p;
+            double best_a_r2 = -1.0;
+            for (int32_t cur = p; cur >= 0; cur = next_pt[cur]) {
+                comp_pts.push_back(cur);
+                const double d2 = (kx[cur] - xm) * (kx[cur] - xm) + (ky[cur] - ym) * (ky[cur] - ym);
+                if (d2 > best_a_r2) { best_a_r2 = d2; seed_a = cur; }
+            }
+            int32_t seed_b = seed_a;
+            double best_b_r2 = -1.0;
+            for (int32_t cur : comp_pts) {
+                const double d2 = (kx[cur] - kx[seed_a]) * (kx[cur] - kx[seed_a]) +
+                                  (ky[cur] - ky[seed_a]) * (ky[cur] - ky[seed_a]);
+                if (d2 > best_b_r2) { best_b_r2 = d2; seed_b = cur; }
+            }
+            if (best_b_r2 >= split_min_sep * split_min_sep) {
+                double ax = kx[seed_a], ay = ky[seed_a];
+                double bx = kx[seed_b], by = ky[seed_b];
+                for (int it = 0; it < 6; ++it) {
+                    double sax = 0.0, say = 0.0, sbx = 0.0, sby = 0.0;
+                    int32_t ca = 0, cb = 0;
+                    for (int32_t cur : comp_pts) {
+                        const double da = (kx[cur] - ax) * (kx[cur] - ax) + (ky[cur] - ay) * (ky[cur] - ay);
+                        const double db = (kx[cur] - bx) * (kx[cur] - bx) + (ky[cur] - by) * (ky[cur] - by);
+                        if (da <= db) { sax += kx[cur]; say += ky[cur]; ++ca; }
+                        else { sbx += kx[cur]; sby += ky[cur]; ++cb; }
+                    }
+                    if (ca == 0 || cb == 0) break;
+                    const double nax = sax / ca, nay = say / ca;
+                    const double nbx = sbx / cb, nby = sby / cb;
+                    const bool conv = (std::abs(nax - ax) < 1e-4 && std::abs(nay - ay) < 1e-4 &&
+                                       std::abs(nbx - bx) < 1e-4 && std::abs(nby - by) < 1e-4);
+                    ax = nax; ay = nay; bx = nbx; by = nby;
+                    if (conv) break;
+                }
+                if (std::hypot(ax - bx, ay - by) >= split_min_sep) {
+                    split_a.clear();
+                    split_b.clear();
+                    for (int32_t cur : comp_pts) {
+                        const double da = (kx[cur] - ax) * (kx[cur] - ax) + (ky[cur] - ay) * (ky[cur] - ay);
+                        const double db = (kx[cur] - bx) * (kx[cur] - bx) + (ky[cur] - by) * (ky[cur] - by);
+                        if (da <= db) split_a.push_back(cur);
+                        else split_b.push_back(cur);
+                    }
+                    try_emit_cone(split_a);
+                    try_emit_cone(split_b);
+                }
+            }
         }
-
-        double stripe_ratio = 1.0;
-        if (has_refl && n >= 5 && h_val >= 0.08 && mid_cnt >= 1 && out_cnt >= 1 && (mid_sum + out_sum) > 1.0) {
-            stripe_ratio = (mid_sum / mid_cnt) / std::max(1.0, out_sum / out_cnt);
-        }
-
-        valid_clusters.push_back({
-            cx_o,
-            cy_o,
-            zm,
-            std::max(cfg->covariance_floor_xy, sum_dx2 / n),
-            sum_dxy / n,
-            std::max(cfg->covariance_floor_xy, sum_dy2 / n),
-            std::max(cfg->covariance_floor_z, sum_dz2 / n),
-            geom_q,
-            stripe_ratio,
-            n
-        });
     }
 
     std::stable_sort(valid_clusters.begin(), valid_clusters.end(),

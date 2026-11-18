@@ -355,6 +355,10 @@ public:
         cls_cfg_.surface_axis_offset_m = this->declare_parameter("surface_axis_offset_m", 0.045);
         cls_cfg_.enable_stripe_classification =
             this->declare_parameter("enable_stripe_classification", true) ? 1 : 0;
+        cls_cfg_.enable_cluster_splitting =
+            this->declare_parameter("enable_cluster_splitting", true) ? 1 : 0;
+        cls_cfg_.split_max_radius_m = this->declare_parameter("split_max_radius_m", 0.95);
+        cls_cfg_.split_min_separation_m = this->declare_parameter("split_min_separation_m", 0.28);
         stripe_blue_min_ratio_ = this->declare_parameter("stripe_blue_min_ratio", 1.20);
         stripe_yellow_max_ratio_ = this->declare_parameter("stripe_yellow_max_ratio", 0.75);
 

@@ -64,6 +64,9 @@ ouster_lidar_adapter:
     cone_min_height_m: 0.05
     cone_max_height_m: 0.80
     cone_max_radius_m: 0.40
+    enable_cluster_splitting: true
+    split_max_radius_m: 0.95
+    split_min_separation_m: 0.28
 
     covariance_floor_xy: 0.03
     covariance_floor_z: 0.05

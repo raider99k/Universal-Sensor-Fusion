@@ -89,6 +89,9 @@ struct ClusterBuildConfigC {
     double surface_axis_offset_m;
     int32_t enable_stripe_classification;
     int32_t has_refl;
+    int32_t enable_cluster_splitting;
+    double split_max_radius_m;
+    double split_min_separation_m;
 };
 
 struct ClusterDescriptorC {

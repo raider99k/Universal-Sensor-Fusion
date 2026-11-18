@@ -88,6 +88,9 @@ class ClusterBuildConfigC(ctypes.Structure):
         ("surface_axis_offset_m", ctypes.c_double),
         ("enable_stripe_classification", ctypes.c_int32),
         ("has_refl", ctypes.c_int32),
+        ("enable_cluster_splitting", ctypes.c_int32),
+        ("split_max_radius_m", ctypes.c_double),
+        ("split_min_separation_m", ctypes.c_double),
     ]
 
 
