@@ -1,0 +1,33 @@
+# Preset: Velodyne VLP-16 + Wide-Angle Mono Camera (raw or rectified) + TwistStamped motion
+# Switch camera_distortion_model to "equidistant" if running inference on raw >110 deg fisheye images.
+
+ouster_lidar_adapter:
+  ros__parameters:
+    input_topic: /velodyne_points
+    output_topic: /lidar/cone_clusters
+    target_frame: base_link
+    enable_motion_deskew: true
+    motion_topic: /ego/twist
+    motion_msg_type: twist_stamped
+    enable_packet_accumulation: false
+    enable_adaptive_clustering: true
+    min_cluster_points: 3
+    min_cluster_points_far: 2
+
+fusion_node:
+  ros__parameters:
+    camera_topic: /camera/cone_detections
+    camera_info_topic: /camera/camera_info
+    lidar_topic: /lidar/cone_clusters
+    motion_topic: /ego/twist
+    motion_msg_type: twist_stamped
+    target_frame: base_link
+    use_tf_extrinsics: true
+    enable_camera_info_intrinsics: true
+    camera_distortion_model: plumb_bob
+    enable_stereo_depth_fusion: false
+    enable_ground_plane_depth_fusion: true
+    enable_triangular_cone_mask: true
+    track_motion_model: landmark
+    track_assignment_algorithm: hungarian
+    track_semantic_model: dirichlet

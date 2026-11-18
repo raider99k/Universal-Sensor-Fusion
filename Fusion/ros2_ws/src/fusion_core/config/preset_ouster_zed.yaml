@@ -1,0 +1,33 @@
+# Preset: Ouster OS1 (64/32/16) + Stereolabs ZED (ZED2/ZED2i/ZED X) + /tf_static
+# Usage:
+#   ros2 launch fusion_adapters full_stack.launch.py \
+#     fusion_params_file:=$(ros2 pkg prefix fusion_core)/share/fusion_core/config/preset_ouster_zed.yaml
+
+ouster_lidar_adapter:
+  ros__parameters:
+    input_topic: /ouster/points
+    output_topic: /lidar/cone_clusters
+    target_frame: base_link
+    enable_motion_deskew: true
+    motion_topic: /ego/odometry
+    motion_msg_type: odometry
+    enable_adaptive_ground_model: true
+    enable_stripe_classification: true
+
+fusion_node:
+  ros__parameters:
+    camera_topic: /camera/cone_detections
+    camera_info_topic: /zed/zed_node/left/camera_info
+    depth_topic: /zed/zed_node/depth/depth_registered
+    lidar_topic: /lidar/cone_clusters
+    motion_topic: /ego/odometry
+    motion_msg_type: odometry
+    target_frame: base_link
+    use_tf_extrinsics: true
+    enable_camera_info_intrinsics: true
+    enable_stereo_depth_fusion: true
+    enable_ground_plane_depth_fusion: true
+    enable_triangular_cone_mask: true
+    track_motion_model: landmark
+    track_assignment_algorithm: hungarian
+    track_semantic_model: dirichlet

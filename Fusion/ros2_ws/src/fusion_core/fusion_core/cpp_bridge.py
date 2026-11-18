@@ -119,6 +119,8 @@ class CameraIntrinsicsC(ctypes.Structure):
         ("p1", ctypes.c_double),
         ("p2", ctypes.c_double),
         ("k3", ctypes.c_double),
+        ("k4", ctypes.c_double),
+        ("distortion_model", ctypes.c_int32),
     ]
 
 

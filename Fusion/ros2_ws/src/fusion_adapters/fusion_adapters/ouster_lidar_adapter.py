@@ -40,10 +40,11 @@ except ImportError:
 try:
     from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
     from fusion_interfaces.msg import LidarConeCluster, LidarConeClusters
-    from geometry_msgs.msg import Point, TwistStamped
+    from geometry_msgs.msg import Point, TwistStamped, TwistWithCovarianceStamped
     from nav_msgs.msg import Odometry
     import rclpy
     from rclpy.node import Node
+    from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import Imu, PointCloud2
     from sensor_msgs_py import point_cloud2
 except ImportError:
@@ -52,6 +53,20 @@ except ImportError:
 
     class Node:  # type: ignore
         pass
+
+    class QoSProfile:  # type: ignore
+        def __init__(self, **kwargs) -> None:
+            pass
+
+    class ReliabilityPolicy:  # type: ignore
+        BEST_EFFORT = 0
+        RELIABLE = 1
+
+    class HistoryPolicy:  # type: ignore
+        KEEP_LAST = 0
+
+    class DurabilityPolicy:  # type: ignore
+        VOLATILE = 0
 
     class _HeaderStub:
         def __init__(self) -> None:
@@ -83,6 +98,9 @@ except ImportError:
         pass
 
     class TwistStamped:  # type: ignore
+        pass
+
+    class TwistWithCovarianceStamped:  # type: ignore
         pass
 
     class Imu:  # type: ignore
@@ -254,8 +272,27 @@ class OusterLidarAdapter(Node):
         self._declare_parameters()
         self._load_parameters()
 
+        sensor_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        motion_qos = QoSProfile(
+            depth=50,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        imu_qos = QoSProfile(
+            depth=100,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
         self.sub = self.create_subscription(
-            PointCloud2, self.input_topic, self._on_points, 10
+            PointCloud2, self.input_topic, self._on_points, sensor_qos
         )
         self.motion_sub = None
         self.imu_sub = None
@@ -265,17 +302,25 @@ class OusterLidarAdapter(Node):
         self.latest_imu_stamp = -1.0
         if self.enable_motion_deskew or getattr(self, "enable_imu_leveling", True):
             if self.enable_motion_deskew:
-                if self.motion_msg_type == "twist_stamped":
+                mtype = str(getattr(self, "motion_msg_type", "odometry")).strip().lower()
+                if mtype == "twist_stamped":
                     self.motion_sub = self.create_subscription(
-                        TwistStamped, self.motion_topic, self._on_twist_motion, 50
+                        TwistStamped, self.motion_topic, self._on_twist_motion, motion_qos
+                    )
+                elif mtype == "twist_with_covariance_stamped":
+                    self.motion_sub = self.create_subscription(
+                        TwistWithCovarianceStamped,
+                        self.motion_topic,
+                        self._on_twist_cov_motion,
+                        motion_qos,
                     )
                 else:
                     self.motion_sub = self.create_subscription(
-                        Odometry, self.motion_topic, self._on_motion, 50
+                        Odometry, self.motion_topic, self._on_motion, motion_qos
                     )
             if self.imu_topic:
                 self.imu_sub = self.create_subscription(
-                    Imu, self.imu_topic, self._on_imu, 100
+                    Imu, self.imu_topic, self._on_imu, imu_qos
                 )
         self.pub = self.create_publisher(LidarConeClusters, self.output_topic, 10)
         self.diag_pub = self.create_publisher(DiagnosticArray, self.diag_topic, 10)
@@ -764,11 +809,10 @@ class OusterLidarAdapter(Node):
             )
             self.set_chassis_attitude(roll, pitch)
 
-    def _on_twist_motion(self, msg: TwistStamped) -> None:
-        stamp = self._stamp_to_sec(msg.header.stamp.sec, msg.header.stamp.nanosec)
-        vx_s = float(msg.twist.linear.x)
-        vy_s = float(msg.twist.linear.y)
-        wz = float(msg.twist.angular.z)
+    def _ingest_twist_sample(self, stamp: float, twist_obj: object) -> None:
+        vx_s = float(twist_obj.linear.x)  # type: ignore[attr-defined]
+        vy_s = float(twist_obj.linear.y)  # type: ignore[attr-defined]
+        wz = float(twist_obj.angular.z)  # type: ignore[attr-defined]
         if getattr(self, "imu_topic", "") and getattr(self, "latest_imu_stamp", -1.0) > 0.0:
             if abs(stamp - self.latest_imu_stamp) <= 0.25:
                 wz = float(self.latest_imu_wz)
@@ -777,6 +821,14 @@ class OusterLidarAdapter(Node):
         vx = vx_s + wz * ly
         vy = vy_s - wz * lx
         self.motion_buffer.append((stamp, vx, vy, wz))
+
+    def _on_twist_motion(self, msg: TwistStamped) -> None:
+        stamp = self._stamp_to_sec(msg.header.stamp.sec, msg.header.stamp.nanosec)
+        self._ingest_twist_sample(stamp, msg.twist)
+
+    def _on_twist_cov_motion(self, msg: TwistWithCovarianceStamped) -> None:
+        stamp = self._stamp_to_sec(msg.header.stamp.sec, msg.header.stamp.nanosec)
+        self._ingest_twist_sample(stamp, msg.twist.twist)
 
     def _extract_filtered_points(
         self,

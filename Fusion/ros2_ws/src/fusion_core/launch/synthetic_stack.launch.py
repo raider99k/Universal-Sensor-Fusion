@@ -3,6 +3,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -18,9 +19,15 @@ def generate_launch_description() -> LaunchDescription:
 
     use_adapters = LaunchConfiguration("use_adapters")
     use_foxglove = LaunchConfiguration("use_foxglove_bridge")
+    use_sim_time = ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "use_sim_time",
+                default_value="false",
+                description="Use /clock simulation or rosbag replay time.",
+            ),
             DeclareLaunchArgument(
                 "use_adapters",
                 default_value="true",
@@ -142,7 +149,7 @@ def generate_launch_description() -> LaunchDescription:
                 executable="fusion_node",
                 name="fusion_node",
                 output="screen",
-                parameters=[fusion_params],
+                parameters=[fusion_params, {"use_sim_time": use_sim_time}],
             ),
 
             # --- 3D Visualizer Marker Bridge ---
@@ -151,6 +158,7 @@ def generate_launch_description() -> LaunchDescription:
                 executable="cone_visualizer_node",
                 name="cone_visualizer_node",
                 output="screen",
+                parameters=[{"use_sim_time": use_sim_time}],
             ),
 
             # --- Optional Foxglove WebSocket Bridge ---

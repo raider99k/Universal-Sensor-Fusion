@@ -30,6 +30,8 @@
 #include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/quaternion.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
+#include "geometry_msgs/msg/twist_with_covariance_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -252,6 +254,18 @@ inline std::vector<JsonProfileEntry> parse_profile_json(const std::string& raw) 
     return out;
 }
 
+inline int32_t parse_distortion_model_c(const std::string& raw) {
+    std::string lower;
+    lower.reserve(raw.size());
+    for (char c : raw) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    if (lower == "equidistant" || lower == "kannala_brandt" || lower == "fisheye") {
+        return 1;
+    }
+    return 0;
+}
+
 inline std::string fmt_double(double v, int prec = 3) {
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%.*f", prec, v);
@@ -279,6 +293,7 @@ public:
         input_topic_ = this->declare_parameter<std::string>("input_topic", "/ouster/points");
         output_topic_ = this->declare_parameter<std::string>("output_topic", "/lidar/cone_clusters");
         motion_topic_ = this->declare_parameter<std::string>("motion_topic", "/ego/odometry");
+        motion_msg_type_ = this->declare_parameter<std::string>("motion_msg_type", "odometry");
         imu_topic_ = this->declare_parameter<std::string>("imu_topic", "/imu/data");
         target_frame_ = this->declare_parameter<std::string>("target_frame", "base_link");
 
@@ -350,9 +365,29 @@ public:
             input_topic_, rclcpp::SensorDataQoS(),
             [this](sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) { this->on_cloud(msg); });
 
-        sub_motion_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            motion_topic_, rclcpp::SensorDataQoS(),
-            [this](nav_msgs::msg::Odometry::ConstSharedPtr msg) { this->on_motion(msg); });
+        if (motion_msg_type_ == "twist_stamped") {
+            sub_motion_twist_ = this->create_subscription<geometry_msgs::msg::TwistStamped>(
+                motion_topic_, rclcpp::SensorDataQoS(),
+                [this](geometry_msgs::msg::TwistStamped::ConstSharedPtr msg) {
+                    has_motion_ = true;
+                    motion_vx_ = msg->twist.linear.x;
+                    motion_vy_ = msg->twist.linear.y;
+                    motion_wz_ = msg->twist.angular.z;
+                });
+        } else if (motion_msg_type_ == "twist_with_covariance_stamped") {
+            sub_motion_twist_cov_ = this->create_subscription<geometry_msgs::msg::TwistWithCovarianceStamped>(
+                motion_topic_, rclcpp::SensorDataQoS(),
+                [this](geometry_msgs::msg::TwistWithCovarianceStamped::ConstSharedPtr msg) {
+                    has_motion_ = true;
+                    motion_vx_ = msg->twist.twist.linear.x;
+                    motion_vy_ = msg->twist.twist.linear.y;
+                    motion_wz_ = msg->twist.twist.angular.z;
+                });
+        } else {
+            sub_motion_ = this->create_subscription<nav_msgs::msg::Odometry>(
+                motion_topic_, rclcpp::SensorDataQoS(),
+                [this](nav_msgs::msg::Odometry::ConstSharedPtr msg) { this->on_motion(msg); });
+        }
 
         sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
             imu_topic_, rclcpp::SensorDataQoS(),
@@ -468,6 +503,7 @@ private:
     std::string output_topic_;
     std::string motion_topic_;
     std::string imu_topic_;
+    std::string motion_msg_type_{"odometry"};
     std::string target_frame_;
     double max_leveling_angle_rad_{0.12};
     double stripe_blue_min_ratio_{1.20};
@@ -489,6 +525,8 @@ private:
     rclcpp::Publisher<fusion_interfaces::msg::LidarConeClusters>::SharedPtr pub_clusters_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_cloud_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_motion_;
+    rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr sub_motion_twist_;
+    rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr sub_motion_twist_cov_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu_;
 };
 
@@ -565,11 +603,25 @@ public:
                     }));
         }
 
-        sub_motion_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            motion_topic_, sensor_qos,
-            [this](nav_msgs::msg::Odometry::ConstSharedPtr msg) {
-                this->on_motion(msg);
-            });
+        if (motion_msg_type_ == "twist_stamped") {
+            sub_motion_twist_ = this->create_subscription<geometry_msgs::msg::TwistStamped>(
+                motion_topic_, sensor_qos,
+                [this](geometry_msgs::msg::TwistStamped::ConstSharedPtr msg) {
+                    this->on_motion_twist(msg);
+                });
+        } else if (motion_msg_type_ == "twist_with_covariance_stamped") {
+            sub_motion_twist_cov_ = this->create_subscription<geometry_msgs::msg::TwistWithCovarianceStamped>(
+                motion_topic_, sensor_qos,
+                [this](geometry_msgs::msg::TwistWithCovarianceStamped::ConstSharedPtr msg) {
+                    this->on_motion_twist_cov(msg);
+                });
+        } else {
+            sub_motion_ = this->create_subscription<nav_msgs::msg::Odometry>(
+                motion_topic_, sensor_qos,
+                [this](nav_msgs::msg::Odometry::ConstSharedPtr msg) {
+                    this->on_motion(msg);
+                });
+        }
 
 #ifdef FUSION_HAS_TF2_ROS
         if (use_tf_extrinsics_) {
@@ -632,6 +684,13 @@ private:
         double yaw_rad{0.0};
     };
 
+    struct MotionSampleC {
+        double vx{0.0};
+        double vy{0.0};
+        double vz{0.0};
+        double wz{0.0};
+    };
+
     struct FrameRecordC {
         double stamp{0.0};
         fusion_interfaces::msg::LidarConeClusters::ConstSharedPtr lidar_msg;
@@ -643,6 +702,7 @@ private:
         camera_topic_ = this->declare_parameter<std::string>("camera_topic", "/camera/cone_detections");
         lidar_topic_ = this->declare_parameter<std::string>("lidar_topic", "/lidar/cone_clusters");
         motion_topic_ = this->declare_parameter<std::string>("motion_topic", "/ego/odometry");
+        motion_msg_type_ = this->declare_parameter<std::string>("motion_msg_type", "odometry");
         obs_out_topic_ = this->declare_parameter<std::string>("obs_out_topic", "/perception/cone_observations");
         track_out_topic_ = this->declare_parameter<std::string>("track_out_topic", "/perception/cone_tracks");
         diag_topic_ = this->declare_parameter<std::string>("diag_topic", "/perception/diagnostics");
@@ -655,11 +715,14 @@ private:
         primary_intr_.cy = this->declare_parameter("camera_cy", 360.0);
         primary_intr_.width = std::max<int32_t>(1, this->declare_parameter("camera_width", 1280));
         primary_intr_.height = std::max<int32_t>(1, this->declare_parameter("camera_height", 720));
+        primary_intr_.distortion_model = parse_distortion_model_c(
+            this->declare_parameter<std::string>("camera_distortion_model", "plumb_bob"));
         primary_intr_.k1 = this->declare_parameter("camera_k1", 0.0);
         primary_intr_.k2 = this->declare_parameter("camera_k2", 0.0);
         primary_intr_.p1 = this->declare_parameter("camera_p1", 0.0);
         primary_intr_.p2 = this->declare_parameter("camera_p2", 0.0);
         primary_intr_.k3 = this->declare_parameter("camera_k3", 0.0);
+        primary_intr_.k4 = this->declare_parameter("camera_k4", 0.0);
 
         const double tx = this->declare_parameter("lidar_to_camera_tx_m", 0.0);
         const double ty = this->declare_parameter("lidar_to_camera_ty_m", 0.0);
@@ -902,6 +965,10 @@ private:
                 prof.intr.p1 = num("p1", prof.intr.p1);
                 prof.intr.p2 = num("p2", prof.intr.p2);
                 prof.intr.k3 = num("k3", prof.intr.k3);
+                prof.intr.k4 = num("k4", prof.intr.k4);
+                if (e.strings.count("distortion_model")) {
+                    prof.intr.distortion_model = parse_distortion_model_c(e.strings.at("distortion_model"));
+                }
 
                 prof.base_ext = primary_ext_;
                 const double ex_tx = num("tx_m", num("tx", primary_ext_.t[0]));
@@ -1046,11 +1113,22 @@ private:
         intr.cy = cy;
         intr.width = static_cast<int32_t>(msg->width);
         intr.height = static_cast<int32_t>(msg->height);
-        intr.k1 = (msg->d.size() > 0) ? msg->d[0] : 0.0;
-        intr.k2 = (msg->d.size() > 1) ? msg->d[1] : 0.0;
-        intr.p1 = (msg->d.size() > 2) ? msg->d[2] : 0.0;
-        intr.p2 = (msg->d.size() > 3) ? msg->d[3] : 0.0;
-        intr.k3 = (msg->d.size() > 4) ? msg->d[4] : 0.0;
+        intr.distortion_model = parse_distortion_model_c(msg->distortion_model);
+        if (intr.distortion_model == 1) {
+            intr.k1 = (msg->d.size() > 0) ? msg->d[0] : 0.0;
+            intr.k2 = (msg->d.size() > 1) ? msg->d[1] : 0.0;
+            intr.p1 = 0.0;
+            intr.p2 = 0.0;
+            intr.k3 = (msg->d.size() > 2) ? msg->d[2] : 0.0;
+            intr.k4 = (msg->d.size() > 3) ? msg->d[3] : 0.0;
+        } else {
+            intr.k1 = (msg->d.size() > 0) ? msg->d[0] : 0.0;
+            intr.k2 = (msg->d.size() > 1) ? msg->d[1] : 0.0;
+            intr.p1 = (msg->d.size() > 2) ? msg->d[2] : 0.0;
+            intr.p2 = (msg->d.size() > 3) ? msg->d[3] : 0.0;
+            intr.k3 = (msg->d.size() > 4) ? msg->d[4] : 0.0;
+            intr.k4 = 0.0;
+        }
         ++cnt_camera_info_updates_;
     }
 
@@ -1144,13 +1222,18 @@ private:
                     static_cast<size_t>(queue_size_lidar_), cnt_lidar_overflow_);
     }
 
+    void ingest_motion_sample(double stamp, double vx, double vy, double vz, double wz) {
+        MotionSampleC sample{vx, vy, vz, wz};
+        push_sorted(motion_buffer_, std::make_pair(stamp, sample),
+                    static_cast<size_t>(queue_size_motion_), cnt_motion_overflow_);
+        last_ego_speed_mps_ = std::sqrt(vx * vx + vy * vy + vz * vz);
+    }
+
     void on_motion(const nav_msgs::msg::Odometry::ConstSharedPtr& msg) {
         std::lock_guard<std::mutex> lock(mutex_);
         const double stamp = stamp_to_sec(msg->header.stamp);
-        push_sorted(motion_buffer_, std::make_pair(stamp, msg),
-                    static_cast<size_t>(queue_size_motion_), cnt_motion_overflow_);
         const auto& lin = msg->twist.twist.linear;
-        last_ego_speed_mps_ = std::sqrt(lin.x * lin.x + lin.y * lin.y + lin.z * lin.z);
+        ingest_motion_sample(stamp, lin.x, lin.y, lin.z, msg->twist.twist.angular.z);
         const auto& q = msg->pose.pose.orientation;
         const double q_norm = q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z;
         if (q_norm > 1e-6) {
@@ -1162,6 +1245,20 @@ private:
         }
     }
 
+    void on_motion_twist(const geometry_msgs::msg::TwistStamped::ConstSharedPtr& msg) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const double stamp = stamp_to_sec(msg->header.stamp);
+        const auto& lin = msg->twist.linear;
+        ingest_motion_sample(stamp, lin.x, lin.y, lin.z, msg->twist.angular.z);
+    }
+
+    void on_motion_twist_cov(const geometry_msgs::msg::TwistWithCovarianceStamped::ConstSharedPtr& msg) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const double stamp = stamp_to_sec(msg->header.stamp);
+        const auto& lin = msg->twist.twist.linear;
+        ingest_motion_sample(stamp, lin.x, lin.y, lin.z, msg->twist.twist.angular.z);
+    }
+
     void update_motion_alignment(double reference_stamp) {
         if (motion_buffer_.empty()) {
             last_motion_age_ms_ = std::numeric_limits<double>::infinity();
@@ -1170,19 +1267,19 @@ private:
             return;
         }
         double best_dt = 1e18;
-        nav_msgs::msg::Odometry::ConstSharedPtr best_msg;
+        MotionSampleC best_sample{};
         for (const auto& pair : motion_buffer_) {
             const double dt = std::abs(pair.first - reference_stamp);
             if (dt < best_dt) {
                 best_dt = dt;
-                best_msg = pair.second;
+                best_sample = pair.second;
             }
         }
         const double age_ms = best_dt * 1000.0;
         last_motion_age_ms_ = age_ms;
         max_motion_age_ms_ = std::max(max_motion_age_ms_, age_ms);
-        const auto& lin = best_msg->twist.twist.linear;
-        const double speed = std::sqrt(lin.x * lin.x + lin.y * lin.y + lin.z * lin.z);
+        const double speed = std::sqrt(
+            best_sample.vx * best_sample.vx + best_sample.vy * best_sample.vy + best_sample.vz * best_sample.vz);
         last_motion_comp_error_m_ = speed * age_ms * 1e-3;
         max_motion_comp_error_m_ = std::max(max_motion_comp_error_m_, last_motion_comp_error_m_);
     }
@@ -1191,20 +1288,20 @@ private:
         EgoMotionC ego{};
         if (motion_buffer_.empty()) return ego;
         double best_dt = 1e18;
-        nav_msgs::msg::Odometry::ConstSharedPtr nearest_msg;
+        MotionSampleC nearest_sample{};
         for (const auto& pair : motion_buffer_) {
             const double d = std::abs(pair.first - curr_stamp);
             if (d < best_dt) {
                 best_dt = d;
-                nearest_msg = pair.second;
+                nearest_sample = pair.second;
             }
         }
-        if (!nearest_msg || best_dt > 0.5) return ego;
+        if (best_dt > 0.5) return ego;
 
         ego.has_motion = 1;
-        ego.vx = nearest_msg->twist.twist.linear.x;
-        ego.vy = nearest_msg->twist.twist.linear.y;
-        ego.wz = nearest_msg->twist.twist.angular.z;
+        ego.vx = nearest_sample.vx;
+        ego.vy = nearest_sample.vy;
+        ego.wz = nearest_sample.wz;
         const double dt = (prev_stamp > 0.0) ? std::max(0.0, curr_stamp - prev_stamp) : 0.0;
         ego.dt = dt;
         if (dt <= 1e-6 || dt > 0.5) return ego;
@@ -1215,9 +1312,9 @@ private:
             if (p.first >= (prev_stamp - 0.02) && p.first <= (curr_stamp + 0.02)) {
                 in_win.push_back({
                     p.first,
-                    p.second->twist.twist.linear.x,
-                    p.second->twist.twist.linear.y,
-                    p.second->twist.twist.angular.z
+                    p.second.vx,
+                    p.second.vy,
+                    p.second.wz
                 });
             }
         }
@@ -1916,6 +2013,59 @@ private:
             }
         }
 
+        if (!existing_clusters.empty() && enable_projection_semantics_ && !camera_profiles_.empty()) {
+            const auto& cam0 = camera_profiles_[0];
+            int32_t forward_cnt = 0, in_front_cnt = 0, behind_cnt = 0, in_fov_cnt = 0;
+            const double* R = cam0.dyn_ext.r;
+            const double* t = cam0.dyn_ext.t;
+            for (const auto& c : existing_clusters) {
+                if (c.cx > 0.5 || c.cz > 0.5) ++forward_cnt;
+                const double xc = R[0] * c.cx + R[1] * c.cy + R[2] * c.cz + t[0];
+                const double yc = R[3] * c.cx + R[4] * c.cy + R[5] * c.cz + t[1];
+                const double zc = R[6] * c.cx + R[7] * c.cy + R[8] * c.cz + t[2];
+                if (zc > cam0.dyn_ext.min_depth_m) {
+                    ++in_front_cnt;
+                    const double xn = xc / zc, yn = yc / zc;
+                    double xd = xn, yd = yn;
+                    if (cam0.intr.distortion_model == 1) {
+                        const double r = std::hypot(xn, yn);
+                        if (r > 1e-12) {
+                            const double th = std::atan(r);
+                            const double t2 = th * th, t4 = t2 * t2, t6 = t4 * t2, t8 = t4 * t4;
+                            const double sc = th * (1.0 + cam0.intr.k1 * t2 + cam0.intr.k2 * t4 + cam0.intr.k3 * t6 + cam0.intr.k4 * t8) / r;
+                            xd = xn * sc; yd = yn * sc;
+                        }
+                    }
+                    const double pu = cam0.intr.fx * xd + cam0.intr.cx;
+                    const double pv = cam0.intr.fy * yd + cam0.intr.cy;
+                    if (pu >= 0.0 && pu < static_cast<double>(cam0.intr.width) &&
+                        pv >= 0.0 && pv < static_cast<double>(cam0.intr.height)) {
+                        ++in_fov_cnt;
+                    }
+                } else {
+                    ++behind_cnt;
+                }
+            }
+            if (forward_cnt > 0 && in_front_cnt == 0 && behind_cnt > 0) {
+                last_extrinsics_sanity_ = "error_points_behind_camera_check_optical_frame";
+            } else if (in_front_cnt > 0 && in_fov_cnt == 0) {
+                last_extrinsics_sanity_ = "warn_points_outside_image_fov";
+            } else {
+                last_extrinsics_sanity_ = "ok";
+            }
+            if (last_extrinsics_sanity_ != "ok") {
+                ++extrinsics_sanity_warn_streak_;
+                if (extrinsics_sanity_warn_streak_ == 5 || extrinsics_sanity_warn_streak_ == 50 ||
+                    (extrinsics_sanity_warn_streak_ > 50 && extrinsics_sanity_warn_streak_ % 100 == 0)) {
+                    RCLCPP_WARN(this->get_logger(),
+                                "Extrinsics/frame sanity check reported '%s' (streak=%d). Check optical frame or TF extrinsics.",
+                                last_extrinsics_sanity_.c_str(), extrinsics_sanity_warn_streak_);
+                }
+            } else {
+                extrinsics_sanity_warn_streak_ = 0;
+            }
+        }
+
         if (enable_camera_fallback_ && out_obs.empty() && cam_msg && !cam_msg->detections.empty()) {
             build_camera_fallback_observations(cam_msg, lidar_stamp_s, source + "_camera_fallback", out_obs, out_trk_obs);
         }
@@ -2607,9 +2757,12 @@ private:
                    sync_delta_std_ms_ >= sync_jitter_warn_ms_ ||
                    last_projection_residual_mean_px_ >= projection_residual_warn_px_ ||
                    (std::isfinite(last_motion_age_ms_) && last_motion_age_ms_ >= motion_age_warn_ms_) ||
+                   (last_extrinsics_sanity_ != "ok" && last_extrinsics_sanity_ != "no_clusters") ||
                    (use_tf_extrinsics_ && (!last_tf_lookup_ok_ || last_tf_age_ms_ >= tf_extrinsics_warn_age_ms_))) {
             st.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-            st.message = "degraded or dropped data detected";
+            st.message = (last_extrinsics_sanity_ != "ok" && last_extrinsics_sanity_ != "no_clusters")
+                             ? ("extrinsics sanity: " + last_extrinsics_sanity_)
+                             : "degraded or dropped data detected";
         }
 
         auto add_kv = [&](const std::string& k, const std::string& v) {
@@ -2653,6 +2806,7 @@ private:
         add_kv("projection_residual_mean_total_px", fmt_double(proj_res_total_mean, 3));
         add_kv("use_tf_extrinsics", use_tf_extrinsics_ ? "true" : "false");
         add_kv("last_extrinsics_source", last_extrinsics_source_);
+        add_kv("last_extrinsics_sanity", last_extrinsics_sanity_);
         add_kv("last_tf_lookup_ok", last_tf_lookup_ok_ ? "true" : "false");
         add_kv("last_tf_age_ms", fmt_double(last_tf_age_ms_, 3));
         add_kv("last_tf_lidar_frame", last_tf_lidar_frame_);
@@ -2720,6 +2874,7 @@ private:
 
     // Parameters
     std::string camera_topic_, lidar_topic_, motion_topic_;
+    std::string motion_msg_type_{"odometry"};
     std::string obs_out_topic_, track_out_topic_, diag_topic_, target_frame_;
     bool enable_projection_semantics_{true};
     bool use_tf_extrinsics_{false};
@@ -2783,7 +2938,7 @@ private:
     std::vector<CameraProfileState> camera_profiles_;
     std::vector<LidarProfileState> lidar_profiles_;
     std::deque<std::pair<double, fusion_interfaces::msg::LidarConeClusters::ConstSharedPtr>> lidar_buffer_;
-    std::deque<std::pair<double, nav_msgs::msg::Odometry::ConstSharedPtr>> motion_buffer_;
+    std::deque<std::pair<double, MotionSampleC>> motion_buffer_;
     std::deque<FrameRecordC> frame_history_;
     std::deque<double> sync_delta_window_ms_;
     std::deque<OnlineCalibPairC> calib_pairs_window_;
@@ -2807,7 +2962,8 @@ private:
     double last_motion_age_ms_{0.0}, max_motion_age_ms_{0.0}, last_motion_comp_error_m_{0.0}, max_motion_comp_error_m_{0.0};
     bool last_tf_lookup_ok_{true};
     double last_tf_age_ms_{0.0};
-    std::string last_extrinsics_source_{"params"}, last_tf_lookup_error_, last_tf_lidar_frame_, last_tf_camera_frame_;
+    std::string last_extrinsics_source_{"params"}, last_extrinsics_sanity_{"ok"}, last_tf_lookup_error_, last_tf_lidar_frame_, last_tf_camera_frame_;
+    int32_t extrinsics_sanity_warn_streak_{0};
     std::map<std::string, double> last_stage_ms_, max_stage_ms_;
 
     // Counters
@@ -2840,6 +2996,8 @@ private:
     rclcpp::Subscription<fusion_interfaces::msg::LidarConeClusters>::SharedPtr sub_lidar_;
     std::vector<rclcpp::Subscription<fusion_interfaces::msg::LidarConeClusters>::SharedPtr> sub_extra_lidars_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_motion_;
+    rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr sub_motion_twist_;
+    rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr sub_motion_twist_cov_;
 
 #ifdef FUSION_HAS_TF2_ROS
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;

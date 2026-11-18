@@ -104,17 +104,39 @@ class CameraIntrinsics:
     p1: float = 0.0
     p2: float = 0.0
     k3: float = 0.0
+    k4: float = 0.0
+    distortion_model: str = "plumb_bob"
+
+    def is_equidistant(self) -> bool:
+        m = str(self.distortion_model or "plumb_bob").strip().lower()
+        return m in ("equidistant", "kannala_brandt", "fisheye")
 
     def has_distortion(self) -> bool:
         return (
-            abs(self.k1) > 1e-12
+            self.is_equidistant()
+            or abs(self.k1) > 1e-12
             or abs(self.k2) > 1e-12
             or abs(self.p1) > 1e-12
             or abs(self.p2) > 1e-12
             or abs(self.k3) > 1e-12
+            or abs(self.k4) > 1e-12
         )
 
     def distort_normalized(self, xn: float, yn: float) -> Tuple[float, float]:
+        if self.is_equidistant():
+            r = math.hypot(xn, yn)
+            if r <= 1e-12:
+                return xn, yn
+            theta = math.atan(r)
+            t2 = theta * theta
+            t4 = t2 * t2
+            t6 = t4 * t2
+            t8 = t4 * t4
+            theta_d = theta * (
+                1.0 + self.k1 * t2 + self.k2 * t4 + self.k3 * t6 + self.k4 * t8
+            )
+            scale = theta_d / r
+            return float(xn * scale), float(yn * scale)
         if not self.has_distortion():
             return xn, yn
         r2 = xn * xn + yn * yn
@@ -127,6 +149,32 @@ class CameraIntrinsics:
         return float(xd), float(yd)
 
     def undistort_normalized(self, xd: float, yd: float, iterations: int = 5) -> Tuple[float, float]:
+        if self.is_equidistant():
+            theta_d = math.hypot(xd, yd)
+            if theta_d <= 1e-12:
+                return xd, yd
+            theta = theta_d
+            for _ in range(max(6, iterations)):
+                t2 = theta * theta
+                t4 = t2 * t2
+                t6 = t4 * t2
+                t8 = t4 * t4
+                f = theta * (
+                    1.0 + self.k1 * t2 + self.k2 * t4 + self.k3 * t6 + self.k4 * t8
+                ) - theta_d
+                df = (
+                    1.0
+                    + 3.0 * self.k1 * t2
+                    + 5.0 * self.k2 * t4
+                    + 7.0 * self.k3 * t6
+                    + 9.0 * self.k4 * t8
+                )
+                if abs(df) <= 1e-9:
+                    break
+                theta -= f / df
+            theta = _clamp(theta, 0.0, 1.55)
+            scale = math.tan(theta) / theta_d
+            return float(xd * scale), float(yd * scale)
         if not self.has_distortion():
             return xd, yd
         xn, yn = xd, yd
@@ -491,8 +539,9 @@ class EarlyFusionProjector:
             z_cam += self.extrinsics.translation[2]
             if z_cam > self.min_depth_m:
                 in_front_cam += 1
-                u = self.intrinsics.fx * (x_cam / z_cam) + self.intrinsics.cx
-                v = self.intrinsics.fy * (y_cam / z_cam) + self.intrinsics.cy
+                xd, yd = self.intrinsics.distort_normalized(x_cam / z_cam, y_cam / z_cam)
+                u = self.intrinsics.fx * xd + self.intrinsics.cx
+                v = self.intrinsics.fy * yd + self.intrinsics.cy
                 if 0.0 <= u < self.intrinsics.width and 0.0 <= v < self.intrinsics.height:
                     in_fov += 1
             else:
@@ -697,6 +746,8 @@ class EarlyFusionProjector:
                 float(self.intrinsics.p1),
                 float(self.intrinsics.p2),
                 float(self.intrinsics.k3),
+                float(getattr(self.intrinsics, "k4", 0.0)),
+                1 if self.intrinsics.is_equidistant() else 0,
             )
             flat_r = [float(v) for row in self.extrinsics.rotation for v in row]
             c_ext = ExtrinsicsC(
@@ -912,7 +963,18 @@ class EarlyFusionProjector:
                 if getattr(det, "is_big_orange", False)
                 else float(cone_height_m)
             )
-            depth_bbox = float(eff_height_m * fy / max(1e-3, h_px))
+            if self.intrinsics.is_equidistant():
+                u_mid = 0.5 * (float(det.xmin) + float(det.xmax))
+                xd_mid = (u_mid - float(self.intrinsics.cx)) / fx
+                _, yn_t = self.intrinsics.undistort_normalized(
+                    xd_mid, (float(det.ymin) - float(self.intrinsics.cy)) / fy
+                )
+                _, yn_b_ext = self.intrinsics.undistort_normalized(
+                    xd_mid, (float(det.ymax) - float(self.intrinsics.cy)) / fy
+                )
+                depth_bbox = float(eff_height_m / max(1e-4, abs(yn_b_ext - yn_t)))
+            else:
+                depth_bbox = float(eff_height_m * fy / max(1e-3, h_px))
             sigma_bbox = max(0.10, 0.14 * depth_bbox)
 
             poly = getattr(det, "polygon_uv", None)

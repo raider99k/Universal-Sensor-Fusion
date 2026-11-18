@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -9,9 +10,15 @@ def generate_launch_description() -> LaunchDescription:
     camera_params_file = LaunchConfiguration("camera_params_file")
     lidar_params_file = LaunchConfiguration("lidar_params_file")
     fusion_params_file = LaunchConfiguration("fusion_params_file")
+    use_sim_time = ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "use_sim_time",
+                default_value="false",
+                description="Use /clock simulation or rosbag replay time.",
+            ),
             DeclareLaunchArgument(
                 "camera_params_file",
                 default_value=PathJoinSubstitution(
@@ -46,21 +53,21 @@ def generate_launch_description() -> LaunchDescription:
                 executable="camera_detection_adapter",
                 name="camera_detection_adapter",
                 output="screen",
-                parameters=[camera_params_file],
+                parameters=[camera_params_file, {"use_sim_time": use_sim_time}],
             ),
             Node(
                 package="fusion_adapters",
                 executable="ouster_lidar_adapter",
                 name="ouster_lidar_adapter",
                 output="screen",
-                parameters=[lidar_params_file],
+                parameters=[lidar_params_file, {"use_sim_time": use_sim_time}],
             ),
             Node(
                 package="fusion_core",
                 executable="fusion_node",
                 name="fusion_node",
                 output="screen",
-                parameters=[fusion_params_file],
+                parameters=[fusion_params_file, {"use_sim_time": use_sim_time}],
             ),
         ]
     )

@@ -4,6 +4,7 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -14,9 +15,15 @@ def generate_launch_description() -> LaunchDescription:
     onnx_params = LaunchConfiguration("onnx_params_file")
     use_onnx_camera = LaunchConfiguration("use_onnx_camera")
     use_visualizer = LaunchConfiguration("use_visualizer")
+    use_sim_time = ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "use_sim_time",
+                default_value="false",
+                description="Use /clock simulation or rosbag replay time.",
+            ),
             DeclareLaunchArgument(
                 "lidar_params_file",
                 default_value=PathJoinSubstitution(
@@ -59,14 +66,14 @@ def generate_launch_description() -> LaunchDescription:
                         package="fusion_core_cpp",
                         plugin="fusion_core_cpp::OusterLidarComposableNode",
                         name="ouster_lidar_adapter",
-                        parameters=[lidar_params],
+                        parameters=[lidar_params, {"use_sim_time": use_sim_time}],
                         extra_arguments=[{"use_intra_process_comms": True}],
                     ),
                     ComposableNode(
                         package="fusion_core_cpp",
                         plugin="fusion_core_cpp::FusionCoreComposableNode",
                         name="fusion_node",
-                        parameters=[fusion_params],
+                        parameters=[fusion_params, {"use_sim_time": use_sim_time}],
                         extra_arguments=[{"use_intra_process_comms": True}],
                     ),
                 ],
@@ -77,7 +84,7 @@ def generate_launch_description() -> LaunchDescription:
                 executable="onnx_camera_detector",
                 name="onnx_camera_detector",
                 output="screen",
-                parameters=[onnx_params],
+                parameters=[onnx_params, {"use_sim_time": use_sim_time}],
             ),
             Node(
                 condition=IfCondition(use_visualizer),
@@ -85,6 +92,7 @@ def generate_launch_description() -> LaunchDescription:
                 executable="cone_visualizer_node",
                 name="cone_visualizer_node",
                 output="screen",
+                parameters=[{"use_sim_time": use_sim_time}],
             ),
         ]
     )

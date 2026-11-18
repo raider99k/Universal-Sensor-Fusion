@@ -16,7 +16,14 @@ try:
         LidarConeCluster,
         LidarConeClusters,
     )
-    from geometry_msgs.msg import Point, PoseStamped, Quaternion, Vector3
+    from geometry_msgs.msg import (
+        Point,
+        PoseStamped,
+        Quaternion,
+        TwistStamped,
+        TwistWithCovarianceStamped,
+        Vector3,
+    )
     from nav_msgs.msg import Odometry, Path
     import rclpy
     from rclpy.duration import Duration
@@ -167,6 +174,12 @@ except ImportError:
             self.sensor_health = 0
 
     class Odometry:  # type: ignore
+        pass
+
+    class TwistStamped:  # type: ignore
+        pass
+
+    class TwistWithCovarianceStamped:  # type: ignore
         pass
 
     class CameraInfo:  # type: ignore
@@ -347,7 +360,7 @@ class FusionNode(Node):
         self.lidar_buffer: Deque[Tuple[float, LidarConeClusters]] = deque(
             maxlen=self.queue_size_lidar
         )
-        self.motion_buffer: Deque[Tuple[float, Odometry]] = deque(maxlen=self.queue_size_motion)
+        self.motion_buffer: Deque[Tuple[float, Any]] = deque(maxlen=self.queue_size_motion)
 
         self._build_camera_and_lidar_registries()
 
@@ -411,7 +424,15 @@ class FusionNode(Node):
                 lambda msg, lid=lid_id: self._on_extra_lidar(msg, lidar_id=lid),
                 sensor_qos,
             )
-        self.create_subscription(Odometry, self.motion_topic, self._on_motion, sensor_qos)
+        motion_mtype = str(getattr(self, "motion_msg_type", "odometry")).strip().lower()
+        if motion_mtype == "twist_stamped":
+            self.create_subscription(TwistStamped, self.motion_topic, self._on_motion, sensor_qos)
+        elif motion_mtype == "twist_with_covariance_stamped":
+            self.create_subscription(
+                TwistWithCovarianceStamped, self.motion_topic, self._on_motion, sensor_qos
+            )
+        else:
+            self.create_subscription(Odometry, self.motion_topic, self._on_motion, sensor_qos)
         self.tracker = MultiTargetEKFTracker(self._tracker_config())
         self.frame_history: List[FrameRecord] = []
         self.history_base_snapshot = self.tracker.empty_snapshot()
@@ -545,6 +566,7 @@ class FusionNode(Node):
             ("camera_topic", "/camera/cone_detections"),
             ("lidar_topic", "/lidar/cone_clusters"),
             ("motion_topic", "/ego/odometry"),
+            ("motion_msg_type", "odometry"),
             ("obs_out_topic", "/perception/cone_observations"),
             ("track_out_topic", "/perception/cone_tracks"),
             ("diag_topic", "/perception/diagnostics"),
@@ -556,11 +578,13 @@ class FusionNode(Node):
             ("camera_cy", 360.0),
             ("camera_width", 1280),
             ("camera_height", 720),
+            ("camera_distortion_model", "plumb_bob"),
             ("camera_k1", 0.0),
             ("camera_k2", 0.0),
             ("camera_p1", 0.0),
             ("camera_p2", 0.0),
             ("camera_k3", 0.0),
+            ("camera_k4", 0.0),
             ("lidar_to_camera_tx_m", 0.0),
             ("lidar_to_camera_ty_m", 0.0),
             ("lidar_to_camera_tz_m", 0.0),
@@ -707,6 +731,7 @@ class FusionNode(Node):
         self.camera_topic = str(self.get_parameter("camera_topic").value)
         self.lidar_topic = str(self.get_parameter("lidar_topic").value)
         self.motion_topic = str(self.get_parameter("motion_topic").value)
+        self.motion_msg_type = str(self.get_parameter("motion_msg_type").value)
         self.obs_out_topic = str(self.get_parameter("obs_out_topic").value)
         self.track_out_topic = str(self.get_parameter("track_out_topic").value)
         self.diag_topic = str(self.get_parameter("diag_topic").value)
@@ -720,11 +745,15 @@ class FusionNode(Node):
         self.camera_cy = float(self.get_parameter("camera_cy").value)
         self.camera_width = int(self.get_parameter("camera_width").value)
         self.camera_height = int(self.get_parameter("camera_height").value)
+        self.camera_distortion_model = str(
+            self.get_parameter("camera_distortion_model").value
+        )
         self.camera_k1 = float(self.get_parameter("camera_k1").value)
         self.camera_k2 = float(self.get_parameter("camera_k2").value)
         self.camera_p1 = float(self.get_parameter("camera_p1").value)
         self.camera_p2 = float(self.get_parameter("camera_p2").value)
         self.camera_k3 = float(self.get_parameter("camera_k3").value)
+        self.camera_k4 = float(self.get_parameter("camera_k4").value)
         self.lidar_to_camera_tx_m = float(
             self.get_parameter("lidar_to_camera_tx_m").value
         )
@@ -1130,6 +1159,8 @@ class FusionNode(Node):
             p1=getattr(self, "camera_p1", 0.0),
             p2=getattr(self, "camera_p2", 0.0),
             k3=getattr(self, "camera_k3", 0.0),
+            k4=getattr(self, "camera_k4", 0.0),
+            distortion_model=str(getattr(self, "camera_distortion_model", "plumb_bob")),
         )
         extrinsics = LidarToCameraExtrinsics.from_rpy_translation(
             tx=self.lidar_to_camera_tx_m,
@@ -1212,6 +1243,8 @@ class FusionNode(Node):
                 p1=getattr(self, "camera_p1", 0.0),
                 p2=getattr(self, "camera_p2", 0.0),
                 k3=getattr(self, "camera_k3", 0.0),
+                k4=getattr(self, "camera_k4", 0.0),
+                distortion_model=str(getattr(self, "camera_distortion_model", "plumb_bob")),
             )
             sec_ext = LidarToCameraExtrinsics.from_rpy_translation(
                 tx=getattr(self, "secondary_lidar_to_camera_tx_m", 0.0),
@@ -1263,6 +1296,13 @@ class FusionNode(Node):
                         p1=float(entry.get("p1", getattr(self, "camera_p1", 0.0))),
                         p2=float(entry.get("p2", getattr(self, "camera_p2", 0.0))),
                         k3=float(entry.get("k3", getattr(self, "camera_k3", 0.0))),
+                        k4=float(entry.get("k4", getattr(self, "camera_k4", 0.0))),
+                        distortion_model=str(
+                            entry.get(
+                                "distortion_model",
+                                getattr(self, "camera_distortion_model", "plumb_bob"),
+                            )
+                        ),
                     )
                     ext = LidarToCameraExtrinsics.from_rpy_translation(
                         tx=float(entry.get("tx_m", entry.get("tx", self.lidar_to_camera_tx_m))),
@@ -1500,14 +1540,29 @@ class FusionNode(Node):
             self._request_replay(stamp)
         self._push_sorted(self.lidar_buffer, (stamp, msg), "lidar_overflow")
 
-    def _on_motion(self, msg: Odometry) -> None:
+    @staticmethod
+    def _extract_twist_from_motion_msg(msg: Any) -> Tuple[float, float, float]:
+        """Extract (vx, vy, wz) from Odometry, TwistWithCovarianceStamped, or TwistStamped."""
+        tw_outer = getattr(msg, "twist", None)
+        tw = getattr(tw_outer, "twist", None)
+        if tw is None:
+            tw = tw_outer
+        lin = getattr(tw, "linear", None)
+        ang = getattr(tw, "angular", None)
+        vx_v = float(getattr(lin, "x", 0.0)) if lin is not None else 0.0
+        vy_v = float(getattr(lin, "y", 0.0)) if lin is not None else 0.0
+        wz_v = float(getattr(ang, "z", 0.0)) if ang is not None else 0.0
+        return vx_v, vy_v, wz_v
+
+    def _on_motion(self, msg: Any) -> None:
         stamp = self._stamp_to_sec(msg.header.stamp.sec, msg.header.stamp.nanosec)
         self._push_sorted(self.motion_buffer, (stamp, msg), "motion_overflow")
-        lin = msg.twist.twist.linear
-        self.last_ego_speed_mps = float(
-            (float(lin.x) * float(lin.x) + float(lin.y) * float(lin.y) + float(lin.z) * float(lin.z))
-            ** 0.5
-        )
+        vx, vy, _wz = self._extract_twist_from_motion_msg(msg)
+        tw_outer = getattr(msg, "twist", None)
+        tw = getattr(tw_outer, "twist", None) or tw_outer
+        lin = getattr(tw, "linear", None)
+        vz = float(getattr(lin, "z", 0.0)) if lin is not None else 0.0
+        self.last_ego_speed_mps = float((vx * vx + vy * vy + vz * vz) ** 0.5)
         pose_obj = getattr(getattr(msg, "pose", None), "pose", None)
         q = getattr(pose_obj, "orientation", None)
         if q is not None and hasattr(q, "w"):
@@ -2103,9 +2158,20 @@ class FusionNode(Node):
                 tracker_observations.append(self._to_tracker_observation(obs))
 
         if cluster_positions and self.enable_projection_semantics:
-            self.last_extrinsics_sanity = self.projector.check_extrinsics_sanity(
-                cluster_positions
-            )
+            sanity = self.projector.check_extrinsics_sanity(cluster_positions)
+            self.last_extrinsics_sanity = sanity
+            if sanity.startswith("error_") or sanity.startswith("warn_"):
+                streak = int(getattr(self, "_extrinsics_sanity_warn_streak", 0)) + 1
+                self._extrinsics_sanity_warn_streak = streak
+                if streak in (5, 50) or (streak > 50 and streak % 100 == 0):
+                    logger = self.get_logger() if hasattr(self, "get_logger") else None
+                    if logger is not None:
+                        logger.warn(
+                            f"Extrinsics/frame sanity check reported '{sanity}' "
+                            f"(streak={streak}). Check camera optical frame vs. body frame or TF extrinsics."
+                        )
+            else:
+                self._extrinsics_sanity_warn_streak = 0
 
         # Bidirectional Camera -> 3D Frustum recovery for unmatched distant cones
         if (
@@ -2297,12 +2363,8 @@ class FusionNode(Node):
             yaw_rate = 0.0
             motion_buf = getattr(self, "motion_buffer", None)
             if motion_buf:
-                _, last_odom = motion_buf[-1]
-                lin = last_odom.twist.twist.linear
-                ang = last_odom.twist.twist.angular
-                vx_mps = float(lin.x)
-                vy_mps = float(lin.y)
-                yaw_rate = float(ang.z)
+                _, last_motion = motion_buf[-1]
+                vx_mps, vy_mps, yaw_rate = self._extract_twist_from_motion_msg(last_motion)
             calib_window.append(
                 CalibrationFrameSample(
                     clusters_xyz=clusters_at_cam_pos,
@@ -2402,23 +2464,14 @@ class FusionNode(Node):
         if abs(nearest_stamp - curr_stamp) > 0.5:
             return None
 
-        def _extract_twist(m: Any) -> Tuple[float, float, float]:
-            tw = getattr(getattr(m, "twist", None), "twist", None)
-            lin = getattr(tw, "linear", None)
-            ang = getattr(tw, "angular", None)
-            vx_v = float(getattr(lin, "x", 0.0)) if lin is not None else 0.0
-            vy_v = float(getattr(lin, "y", 0.0)) if lin is not None else 0.0
-            wz_v = float(getattr(ang, "z", 0.0)) if ang is not None else 0.0
-            return vx_v, vy_v, wz_v
-
-        vx, vy, wz = _extract_twist(msg)
+        vx, vy, wz = self._extract_twist_from_motion_msg(msg)
         dt = max(0.0, curr_stamp - prev_stamp) if prev_stamp > 0.0 else None
         if dt is None or dt <= 1e-6 or dt > 0.5:
             return EgoMotionStep(vx=vx, vy=vy, wz=wz, dt=dt)
 
         # Piecewise SE(2) integration over all buffered odometry samples in [prev_stamp, curr_stamp]
         in_window = [
-            (s, _extract_twist(m))
+            (s, self._extract_twist_from_motion_msg(m))
             for s, m in motion_buf
             if (prev_stamp - 0.02) <= s <= (curr_stamp + 0.02)
         ]
@@ -3126,11 +3179,23 @@ class FusionNode(Node):
         if fx <= 0.0 or fy <= 0.0 or width <= 0 or height <= 0:
             return
 
-        k1 = float(d_vec[0]) if len(d_vec) > 0 else 0.0
-        k2 = float(d_vec[1]) if len(d_vec) > 1 else 0.0
-        p1 = float(d_vec[2]) if len(d_vec) > 2 else 0.0
-        p2 = float(d_vec[3]) if len(d_vec) > 3 else 0.0
-        k3 = float(d_vec[4]) if len(d_vec) > 4 else 0.0
+        dist_model_raw = str(getattr(msg, "distortion_model", "plumb_bob") or "plumb_bob").strip().lower()
+        if dist_model_raw in ("equidistant", "kannala_brandt", "fisheye"):
+            dist_model = "equidistant"
+            k1 = float(d_vec[0]) if len(d_vec) > 0 else 0.0
+            k2 = float(d_vec[1]) if len(d_vec) > 1 else 0.0
+            p1 = 0.0
+            p2 = 0.0
+            k3 = float(d_vec[2]) if len(d_vec) > 2 else 0.0
+            k4 = float(d_vec[3]) if len(d_vec) > 3 else 0.0
+        else:
+            dist_model = "plumb_bob"
+            k1 = float(d_vec[0]) if len(d_vec) > 0 else 0.0
+            k2 = float(d_vec[1]) if len(d_vec) > 1 else 0.0
+            p1 = float(d_vec[2]) if len(d_vec) > 2 else 0.0
+            p2 = float(d_vec[3]) if len(d_vec) > 3 else 0.0
+            k3 = float(d_vec[4]) if len(d_vec) > 4 else 0.0
+            k4 = 0.0
 
         new_intr = CameraIntrinsics(
             fx=fx,
@@ -3144,6 +3209,8 @@ class FusionNode(Node):
             p1=p1,
             p2=p2,
             k3=k3,
+            k4=k4,
+            distortion_model=dist_model,
         )
         profiles = getattr(self, "camera_profiles", None)
         if profiles and camera_id in profiles:
@@ -3297,12 +3364,12 @@ class FusionNode(Node):
         self.last_motion_age_ms = float(age_ms)
         self.max_motion_age_ms = max(self.max_motion_age_ms, self.last_motion_age_ms)
 
-        lin = msg.twist.twist.linear
-        speed = (
-            float(lin.x) * float(lin.x)
-            + float(lin.y) * float(lin.y)
-            + float(lin.z) * float(lin.z)
-        ) ** 0.5
+        vx, vy, _wz = self._extract_twist_from_motion_msg(msg)
+        tw_outer = getattr(msg, "twist", None)
+        tw = getattr(tw_outer, "twist", None) or tw_outer
+        lin = getattr(tw, "linear", None)
+        vz = float(getattr(lin, "z", 0.0)) if lin is not None else 0.0
+        speed = (vx * vx + vy * vy + vz * vz) ** 0.5
         self.last_motion_comp_error_m = float(speed * age_ms * 1e-3)
         self.max_motion_comp_error_m = max(
             self.max_motion_comp_error_m, self.last_motion_comp_error_m
@@ -3384,6 +3451,8 @@ class FusionNode(Node):
             or self.sync_delta_std_ms >= self.sync_jitter_warn_ms
             or self.last_projection_residual_mean_px >= self.projection_residual_warn_px
             or self.last_motion_age_ms >= self.motion_age_warn_ms
+            or getattr(self, "last_extrinsics_sanity", "ok")
+            not in ("ok", "no_clusters")
             or (
                 self.use_tf_extrinsics
                 and (
@@ -3393,7 +3462,10 @@ class FusionNode(Node):
             )
         ):
             status.level = DiagnosticStatus.WARN
-            status.message = "degraded or dropped data detected"
+            if getattr(self, "last_extrinsics_sanity", "ok") not in ("ok", "no_clusters"):
+                status.message = f"extrinsics sanity: {self.last_extrinsics_sanity}"
+            else:
+                status.message = "degraded or dropped data detected"
 
         projection_residual_mean_total_px = (
             self.projection_residual_sum_px_total
@@ -3432,6 +3504,7 @@ class FusionNode(Node):
             ("projection_residual_mean_total_px", f"{projection_residual_mean_total_px:.3f}"),
             ("use_tf_extrinsics", str(self.use_tf_extrinsics).lower()),
             ("last_extrinsics_source", self.last_extrinsics_source),
+            ("last_extrinsics_sanity", str(getattr(self, "last_extrinsics_sanity", "ok"))),
             ("last_tf_lookup_ok", str(self.last_tf_lookup_ok).lower()),
             ("last_tf_age_ms", f"{self.last_tf_age_ms:.3f}"),
             ("last_tf_lidar_frame", self.last_tf_lidar_frame),

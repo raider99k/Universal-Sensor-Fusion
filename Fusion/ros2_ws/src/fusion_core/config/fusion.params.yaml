@@ -3,6 +3,7 @@ fusion_node:
     camera_topic: /camera/cone_detections
     lidar_topic: /lidar/cone_clusters
     motion_topic: /ego/odometry
+    motion_msg_type: odometry
 
     obs_out_topic: /perception/cone_observations
     track_out_topic: /perception/cone_tracks
@@ -15,11 +16,13 @@ fusion_node:
     camera_cy: 360.0
     camera_width: 1280
     camera_height: 720
+    camera_distortion_model: plumb_bob
     camera_k1: 0.0
     camera_k2: 0.0
     camera_p1: 0.0
     camera_p2: 0.0
     camera_k3: 0.0
+    camera_k4: 0.0
     lidar_to_camera_tx_m: 0.0
     lidar_to_camera_ty_m: 0.0
     lidar_to_camera_tz_m: 0.0

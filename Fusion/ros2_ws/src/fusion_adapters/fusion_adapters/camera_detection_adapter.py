@@ -6,6 +6,7 @@ try:
     from fusion_interfaces.msg import CameraConeDetection, CameraConeDetections
     import rclpy
     from rclpy.node import Node
+    from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
     from std_msgs.msg import Float32
     from vision_msgs.msg import Detection2DArray
 except ImportError:  # pragma: no cover - fallback for bare-Python unit testing
@@ -14,6 +15,20 @@ except ImportError:  # pragma: no cover - fallback for bare-Python unit testing
     class Node:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs):
             pass
+
+    class QoSProfile:  # type: ignore[no-redef]
+        def __init__(self, **kwargs):
+            pass
+
+    class ReliabilityPolicy:  # type: ignore[no-redef]
+        BEST_EFFORT = 0
+        RELIABLE = 1
+
+    class HistoryPolicy:  # type: ignore[no-redef]
+        KEEP_LAST = 0
+
+    class DurabilityPolicy:  # type: ignore[no-redef]
+        VOLATILE = 0
 
     class _Header:
         def __init__(self):
@@ -25,7 +40,7 @@ except ImportError:  # pragma: no cover - fallback for bare-Python unit testing
             self.ymin = 0.0
             self.xmax = 0.0
             self.ymax = 0.0
-            self.class_probs = [0.0, 0.0, 0.0, 1.0]
+            self.class_probs = [0.25, 0.25, 0.25, 0.25]
             self.confidence = 0.0
 
     class CameraConeDetections:  # type: ignore[no-redef]
@@ -134,7 +149,7 @@ class CameraDetectionAdapter(Node):
         self.declare_parameter("default_image_quality", 1.0)
         self.declare_parameter(
             "class_map",
-            "blue:0,blue_cone:0,yellow:1,yellow_cone:1,orange:2,orange_cone:2,big_orange:2,large_orange:2,large_orange_cone:2,red:2,unknown:3",
+            "blue:0,blue_cone:0,yellow:1,yellow_cone:1,orange:2,orange_cone:2,small_orange:2,small_orange_cone:2,big_orange:3,big_orange_cone:3,large_orange:3,large_orange_cone:3,red:2",
         )
         self.declare_parameter("max_detections", 256)
         self.declare_parameter("min_confidence", 0.0)
@@ -149,15 +164,22 @@ class CameraDetectionAdapter(Node):
         self.max_detections = int(self.get_parameter("max_detections").value)
         self.min_confidence = float(self.get_parameter("min_confidence").value)
 
+        sensor_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
         self.last_image_quality = _clamp(self.default_image_quality, 0.0, 1.0)
         self.pub = self.create_publisher(CameraConeDetections, self.output_topic, 10)
         self.sub = self.create_subscription(
-            Detection2DArray, self.input_topic, self._on_detections, 10
+            Detection2DArray, self.input_topic, self._on_detections, sensor_qos
         )
         self.quality_sub = None
         if self.quality_topic:
             self.quality_sub = self.create_subscription(
-                Float32, self.quality_topic, self._on_quality, 10
+                Float32, self.quality_topic, self._on_quality, sensor_qos
             )
 
         self.get_logger().info(
@@ -183,15 +205,16 @@ class CameraDetectionAdapter(Node):
 
             for result in det.results:
                 label, score = _extract_label_score(result)
+                best_conf = max(best_conf, score)
                 idx = self.class_mapper.to_index(label)
                 if idx is None:
                     continue
                 probs[idx] += score
-                best_conf = max(best_conf, score)
 
             total = sum(probs)
             if total <= 1e-9:
-                probs = [0.0, 0.0, 0.0, 1.0]
+                # Unmapped/unknown labels use a uniform prior so they never alias big_orange (index 3).
+                probs = [0.25, 0.25, 0.25, 0.25]
             else:
                 probs = [v / total for v in probs]
 

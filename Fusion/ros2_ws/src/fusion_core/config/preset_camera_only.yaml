@@ -1,0 +1,22 @@
+# Preset: Camera-Only (Mono or Stereo ZED) without LiDAR
+# Relies on stereo depth + ground-plane homography + cone bbox-height inverse-variance fusion.
+
+fusion_node:
+  ros__parameters:
+    camera_topic: /camera/cone_detections
+    camera_info_topic: /camera/camera_info
+    depth_topic: ""
+    lidar_topic: /lidar/cone_clusters
+    motion_topic: /ego/odometry
+    motion_msg_type: odometry
+    target_frame: base_link
+    use_tf_extrinsics: true
+    enable_camera_info_intrinsics: true
+    enable_camera_fallback: true
+    enable_ground_plane_depth_fusion: true
+    enable_stereo_depth_fusion: true
+    ground_z_base_m: -0.22
+    camera_fallback_cone_height_m: 0.32
+    track_motion_model: landmark
+    track_assignment_algorithm: hungarian
+    track_semantic_model: dirichlet

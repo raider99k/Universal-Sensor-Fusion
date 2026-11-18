@@ -2,8 +2,15 @@
 set -e
 
 # Source ROS 2 base installation
-if [ -f "/opt/ros/humble/setup.bash" ]; then
-    source "/opt/ros/humble/setup.bash"
+if [ -n "${ROS_DISTRO:-}" ] && [ -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]; then
+    source "/opt/ros/${ROS_DISTRO}/setup.bash"
+else
+    for _distro in humble jazzy rolling; do
+        if [ -f "/opt/ros/${_distro}/setup.bash" ]; then
+            source "/opt/ros/${_distro}/setup.bash"
+            break
+        fi
+    done
 fi
 
 # Source local workspace build

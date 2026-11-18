@@ -4,6 +4,6 @@ camera_detection_adapter:
     output_topic: /camera/cone_detections
     quality_topic: /camera/image_quality
     default_image_quality: 1.0
-    class_map: blue:0,yellow:1,orange:2,unknown:3
+    class_map: blue:0,blue_cone:0,yellow:1,yellow_cone:1,orange:2,orange_cone:2,small_orange:2,small_orange_cone:2,big_orange:3,big_orange_cone:3,large_orange:3,large_orange_cone:3
     max_detections: 256
     min_confidence: 0.05

@@ -1,0 +1,30 @@
+# Preset: Hesai/RoboSense Spinning LiDAR + Dual Front Cameras (left/right wide baseline)
+
+ouster_lidar_adapter:
+  ros__parameters:
+    input_topic: /lidar_points
+    output_topic: /lidar/cone_clusters
+    target_frame: base_link
+    enable_motion_deskew: true
+    motion_topic: /ego/odometry
+    motion_msg_type: odometry
+    deskew_use_point_time_field: true
+
+fusion_node:
+  ros__parameters:
+    camera_topic: /camera_left/cone_detections
+    camera_info_topic: /camera_left/camera_info
+    secondary_camera_topic: /camera_right/cone_detections
+    secondary_camera_info_topic: /camera_right/camera_info
+    lidar_topic: /lidar/cone_clusters
+    motion_topic: /ego/odometry
+    motion_msg_type: odometry
+    target_frame: base_link
+    use_tf_extrinsics: true
+    enable_camera_info_intrinsics: true
+    enable_stereo_depth_fusion: false
+    enable_ground_plane_depth_fusion: true
+    enable_triangular_cone_mask: true
+    track_motion_model: landmark
+    track_assignment_algorithm: hungarian
+    track_semantic_model: dirichlet

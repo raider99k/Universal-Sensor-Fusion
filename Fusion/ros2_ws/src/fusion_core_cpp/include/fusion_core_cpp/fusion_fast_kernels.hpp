@@ -116,6 +116,8 @@ struct CameraIntrinsicsC {
     double p1;
     double p2;
     double k3;
+    double k4;
+    int32_t distortion_model;  // 0: plumb_bob / rational_polynomial, 1: equidistant (Kannala-Brandt)
 };
 
 struct ExtrinsicsC {

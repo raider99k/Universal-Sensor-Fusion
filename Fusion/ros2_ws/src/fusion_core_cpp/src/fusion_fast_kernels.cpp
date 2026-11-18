@@ -1078,9 +1078,22 @@ inline bool project_lidar_point_c(
     const double yn = y_cam / z_cam;
     double xd = xn;
     double yd = yn;
-    if (std::abs(intr->k1) > 1e-12 || std::abs(intr->k2) > 1e-12 ||
-        std::abs(intr->p1) > 1e-12 || std::abs(intr->p2) > 1e-12 ||
-        std::abs(intr->k3) > 1e-12) {
+    if (intr->distortion_model == 1) {
+        const double r = std::hypot(xn, yn);
+        if (r > 1e-12) {
+            const double theta = std::atan(r);
+            const double t2 = theta * theta;
+            const double t4 = t2 * t2;
+            const double t6 = t4 * t2;
+            const double t8 = t4 * t4;
+            const double theta_d = theta * (1.0 + intr->k1 * t2 + intr->k2 * t4 + intr->k3 * t6 + intr->k4 * t8);
+            const double scale = theta_d / r;
+            xd = xn * scale;
+            yd = yn * scale;
+        }
+    } else if (std::abs(intr->k1) > 1e-12 || std::abs(intr->k2) > 1e-12 ||
+               std::abs(intr->p1) > 1e-12 || std::abs(intr->p2) > 1e-12 ||
+               std::abs(intr->k3) > 1e-12) {
         const double r2 = xn * xn + yn * yn;
         const double r4 = r2 * r2;
         const double r6 = r4 * r2;
@@ -1478,6 +1491,30 @@ inline void undistort_normalized_c(
     double& out_xn,
     double& out_yn
 ) {
+    if (intr->distortion_model == 1) {
+        const double theta_d = std::hypot(xd, yd);
+        if (theta_d <= 1e-12) {
+            out_xn = xd;
+            out_yn = yd;
+            return;
+        }
+        double theta = theta_d;
+        for (int it = 0; it < 6; ++it) {
+            const double t2 = theta * theta;
+            const double t4 = t2 * t2;
+            const double t6 = t4 * t2;
+            const double t8 = t4 * t4;
+            const double f = theta * (1.0 + intr->k1 * t2 + intr->k2 * t4 + intr->k3 * t6 + intr->k4 * t8) - theta_d;
+            const double df = 1.0 + 3.0 * intr->k1 * t2 + 5.0 * intr->k2 * t4 + 7.0 * intr->k3 * t6 + 9.0 * intr->k4 * t8;
+            if (std::abs(df) <= 1e-9) break;
+            theta -= f / df;
+        }
+        theta = std::max(0.0, std::min(1.55, theta));
+        const double scale = std::tan(theta) / theta_d;
+        out_xn = xd * scale;
+        out_yn = yd * scale;
+        return;
+    }
     if (std::abs(intr->k1) <= 1e-12 && std::abs(intr->k2) <= 1e-12 &&
         std::abs(intr->p1) <= 1e-12 && std::abs(intr->p2) <= 1e-12 &&
         std::abs(intr->k3) <= 1e-12) {
@@ -1646,7 +1683,16 @@ FUSION_CPP_EXPORT int32_t cpp_recover_unmatched_detections(
         }
 
         const double eff_height_m = (det.is_big_orange != 0) ? cfg->big_orange_height_m : cfg->cone_height_m;
-        const double depth_bbox = eff_height_m * fy / std::max(1e-3, h_px);
+        double depth_bbox = 0.0;
+        if (intr->distortion_model == 1) {
+            const double xd_mid = (0.5 * (det.xmin + det.xmax) - intr->cx) / fx;
+            double xn_tmp = 0.0, yn_top = 0.0, yn_bot = 0.0;
+            undistort_normalized_c(xd_mid, (det.ymin - intr->cy) / fy, intr, xn_tmp, yn_top);
+            undistort_normalized_c(xd_mid, (det.ymax - intr->cy) / fy, intr, xn_tmp, yn_bot);
+            depth_bbox = eff_height_m / std::max(1e-4, std::abs(yn_bot - yn_top));
+        } else {
+            depth_bbox = eff_height_m * fy / std::max(1e-3, h_px);
+        }
         const double sigma_bbox = std::max(0.10, 0.14 * depth_bbox);
 
         double u = 0.5 * (det.xmin + det.xmax);

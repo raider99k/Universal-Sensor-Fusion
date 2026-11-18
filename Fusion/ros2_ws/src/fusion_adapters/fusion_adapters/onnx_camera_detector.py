@@ -33,6 +33,7 @@ try:
     from fusion_interfaces.msg import CameraConeDetection, CameraConeDetections
     import rclpy
     from rclpy.node import Node
+    from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import CompressedImage, Image
 except ImportError:  # pragma: no cover - bare-Python unit testing
     rclpy = None
@@ -40,6 +41,20 @@ except ImportError:  # pragma: no cover - bare-Python unit testing
     class Node:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs):
             pass
+
+    class QoSProfile:  # type: ignore[no-redef]
+        def __init__(self, **kwargs):
+            pass
+
+    class ReliabilityPolicy:  # type: ignore[no-redef]
+        BEST_EFFORT = 0
+        RELIABLE = 1
+
+    class HistoryPolicy:  # type: ignore[no-redef]
+        KEEP_LAST = 0
+
+    class DurabilityPolicy:  # type: ignore[no-redef]
+        VOLATILE = 0
 
     CameraConeDetection = CameraConeDetections = CompressedImage = Image = None  # type: ignore
 
@@ -381,11 +396,17 @@ class OnnxCameraDetectorNode(Node):
         )
         self.image_quality = float(self.get_parameter("image_quality").value)
         topic = str(self.get_parameter("image_topic").value)
+        sensor_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         self.pub = self.create_publisher(CameraConeDetections, str(self.get_parameter("output_topic").value), 10)
         if bool(self.get_parameter("compressed").value):
-            self.create_subscription(CompressedImage, topic, self._on_compressed, 1)
+            self.create_subscription(CompressedImage, topic, self._on_compressed, sensor_qos)
         else:
-            self.create_subscription(Image, topic, self._on_raw, 1)
+            self.create_subscription(Image, topic, self._on_raw, sensor_qos)
 
     def _on_compressed(self, msg) -> None:
         arr = np.frombuffer(bytes(msg.data), dtype=np.uint8)
