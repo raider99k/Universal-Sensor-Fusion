@@ -136,6 +136,8 @@ class ExtrinsicsC(ctypes.Structure):
         ("soft_likelihood_min_value", ctypes.c_double),
         ("soft_likelihood_outside_ratio", ctypes.c_double),
         ("enable_frustum_hull_sampling", ctypes.c_int32),
+        ("enable_triangular_cone_mask", ctypes.c_int32),
+        ("cone_mask_apex_width_ratio", ctypes.c_double),
     ]
 
 
@@ -158,6 +160,59 @@ class Detection2DC(ctypes.Structure):
         ("ymax", ctypes.c_double),
         ("class_probs", ctypes.c_double * 4),
         ("confidence", ctypes.c_double),
+        ("polygon_count", ctypes.c_int32),
+        ("polygon_u", ctypes.c_double * 16),
+        ("polygon_v", ctypes.c_double * 16),
+        ("is_big_orange", ctypes.c_int32),
+    ]
+
+
+class StereoDepthImageC(ctypes.Structure):
+    _fields_ = [
+        ("width", ctypes.c_int32),
+        ("height", ctypes.c_int32),
+        ("encoding", ctypes.c_int32),
+        ("data", ctypes.POINTER(ctypes.c_uint8)),
+        ("row_step_bytes", ctypes.c_int32),
+        ("depth_scale", ctypes.c_double),
+        ("baseline_m", ctypes.c_double),
+        ("disparity_sigma_px", ctypes.c_double),
+        ("min_depth_m", ctypes.c_double),
+        ("max_depth_m", ctypes.c_double),
+    ]
+
+
+class FrustumRecoveryConfigC(ctypes.Structure):
+    _fields_ = [
+        ("cone_height_m", ctypes.c_double),
+        ("big_orange_height_m", ctypes.c_double),
+        ("min_confidence", ctypes.c_double),
+        ("min_bbox_height_px", ctypes.c_double),
+        ("min_depth_m", ctypes.c_double),
+        ("max_depth_m", ctypes.c_double),
+        ("dedup_radius_m", ctypes.c_double),
+        ("range_std_fraction", ctypes.c_double),
+        ("bearing_std_fraction", ctypes.c_double),
+        ("enable_ground_plane_depth_fusion", ctypes.c_int32),
+        ("ground_z_base_m", ctypes.c_double),
+        ("ground_slope_rad", ctypes.c_double),
+        ("enable_stereo_depth_fusion", ctypes.c_int32),
+        ("enable_triangular_cone_mask", ctypes.c_int32),
+        ("cone_mask_apex_width_ratio", ctypes.c_double),
+    ]
+
+
+class RecoveredConeC(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_double),
+        ("y", ctypes.c_double),
+        ("z", ctypes.c_double),
+        ("covariance", ctypes.c_double * 9),
+        ("class_probs", ctypes.c_double * 4),
+        ("confidence", ctypes.c_double),
+        ("depth_m", ctypes.c_double),
+        ("detection_idx", ctypes.c_int32),
+        ("used_stereo", ctypes.c_int32),
     ]
 
 
@@ -197,6 +252,55 @@ class TrackerConfigC(ctypes.Structure):
         ("odom_vx_std", ctypes.c_double),
         ("odom_vy_std", ctypes.c_double),
         ("odom_wz_std", ctypes.c_double),
+        ("corridor_prior_weight", ctypes.c_double),
+        ("enable_global_map", ctypes.c_int32),
+        ("global_map_gate_radius_m", ctypes.c_double),
+        ("global_map_min_lap_distance_m", ctypes.c_double),
+    ]
+
+
+class CorridorEstimateC(ctypes.Structure):
+    _fields_ = [
+        ("xm", ctypes.c_double),
+        ("y0", ctypes.c_double),
+        ("slope", ctypes.c_double),
+        ("curvature_kappa", ctypes.c_double),
+        ("track_width_m", ctypes.c_double),
+        ("confidence", ctypes.c_double),
+        ("n_waypoints", ctypes.c_int32),
+        ("left_x", ctypes.c_double * 64),
+        ("left_y", ctypes.c_double * 64),
+        ("right_x", ctypes.c_double * 64),
+        ("right_y", ctypes.c_double * 64),
+        ("wp_x", ctypes.c_double * 64),
+        ("wp_y", ctypes.c_double * 64),
+        ("wp_heading", ctypes.c_double * 64),
+        ("wp_kappa", ctypes.c_double * 64),
+    ]
+
+
+class OnlineCalibPairC(ctypes.Structure):
+    _fields_ = [
+        ("cx", ctypes.c_double),
+        ("cy", ctypes.c_double),
+        ("cz", ctypes.c_double),
+        ("det_u", ctypes.c_double),
+        ("det_v", ctypes.c_double),
+        ("det_w", ctypes.c_double),
+        ("det_h", ctypes.c_double),
+    ]
+
+
+class OnlineCalibResultC(ctypes.Structure):
+    _fields_ = [
+        ("matched_pairs", ctypes.c_int32),
+        ("initial_rmse_px", ctypes.c_double),
+        ("final_rmse_px", ctypes.c_double),
+        ("delta_roll_rad", ctypes.c_double),
+        ("delta_pitch_rad", ctypes.c_double),
+        ("delta_yaw_rad", ctypes.c_double),
+        ("refined_r", ctypes.c_double * 9),
+        ("refined_t", ctypes.c_double * 3),
     ]
 
 
@@ -377,6 +481,52 @@ def get_cpp_kernels() -> Optional[ctypes.CDLL]:
                     ctypes.c_int32,
                 ]
                 lib.cpp_tracker_get_tracks.restype = ctypes.c_int32
+
+                lib.cpp_recover_unmatched_detections.argtypes = [
+                    ctypes.c_int32,
+                    ctypes.POINTER(Detection2DC),
+                    ctypes.POINTER(ctypes.c_uint8),
+                    ctypes.c_int32,
+                    ctypes.POINTER(ClusterInputC),
+                    ctypes.POINTER(CameraIntrinsicsC),
+                    ctypes.POINTER(ExtrinsicsC),
+                    ctypes.POINTER(FrustumRecoveryConfigC),
+                    ctypes.POINTER(StereoDepthImageC),
+                    ctypes.POINTER(RecoveredConeC),
+                    ctypes.c_int32,
+                ]
+                lib.cpp_recover_unmatched_detections.restype = ctypes.c_int32
+
+                lib.cpp_tracker_snapshot_create.argtypes = [ctypes.c_void_p]
+                lib.cpp_tracker_snapshot_create.restype = ctypes.c_void_p
+
+                lib.cpp_tracker_snapshot_restore.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+                lib.cpp_tracker_snapshot_restore.restype = None
+
+                lib.cpp_tracker_snapshot_destroy.argtypes = [ctypes.c_void_p]
+                lib.cpp_tracker_snapshot_destroy.restype = None
+
+                lib.cpp_tracker_get_last_stamp.argtypes = [ctypes.c_void_p]
+                lib.cpp_tracker_get_last_stamp.restype = ctypes.c_double
+
+                lib.cpp_tracker_get_corridor.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.c_double,
+                    ctypes.c_double,
+                    ctypes.POINTER(EgoMotionC),
+                    ctypes.POINTER(CorridorEstimateC),
+                ]
+                lib.cpp_tracker_get_corridor.restype = ctypes.c_int32
+
+                lib.cpp_online_calibrate_extrinsics.argtypes = [
+                    ctypes.c_int32,
+                    ctypes.POINTER(OnlineCalibPairC),
+                    ctypes.POINTER(CameraIntrinsicsC),
+                    ctypes.POINTER(ExtrinsicsC),
+                    ctypes.c_int32,
+                    ctypes.POINTER(OnlineCalibResultC),
+                ]
+                lib.cpp_online_calibrate_extrinsics.restype = ctypes.c_int32
 
                 _LOADED_LIB = lib
                 return _LOADED_LIB

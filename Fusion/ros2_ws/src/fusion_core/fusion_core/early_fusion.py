@@ -172,6 +172,24 @@ class DetectionRecord:
     class_probs: List[float]
     confidence: float
     is_big_orange: bool = False
+    polygon_uv: Optional[List[Tuple[float, float]]] = None
+
+
+@dataclass
+class StereoDepthFrame:
+    """Registered stereo depth or disparity image frame (e.g. Stereolabs ZED X / ZED 2)."""
+
+    stamp: float
+    width: int
+    height: int
+    encoding: str  # "32FC1", "16UC1", or "32FC1_disparity"
+    data: bytes
+    row_step_bytes: int
+    depth_scale: float = 1.0
+    baseline_m: float = 0.12
+    disparity_sigma_px: float = 0.5
+    min_depth_m: float = 0.5
+    max_depth_m: float = 45.0
 
 
 @dataclass
@@ -201,6 +219,7 @@ class FrustumRecoveredCone:
     confidence: float
     depth_m: float
     detection_idx: int
+    used_stereo: bool = False
 
 
 def project_lidar_point_to_image(
@@ -231,6 +250,139 @@ def project_lidar_point_to_image(
     return float(u), float(v), float(z_cam)
 
 
+def _point_in_polygon(poly: Sequence[Tuple[float, float]], u: float, v: float) -> bool:
+    n = len(poly)
+    if n < 3:
+        return False
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > v) != (yj > v)) and (
+            u < (xj - xi) * (v - yi) / ((yj - yi) + 1e-12) + xi
+        ):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _min_dist_to_polygon_edges(poly: Sequence[Tuple[float, float]], u: float, v: float) -> float:
+    n = len(poly)
+    best_d2 = 1e18
+    j = n - 1
+    for i in range(n):
+        x1, y1 = poly[j]
+        x2, y2 = poly[i]
+        dx = x2 - x1
+        dy = y2 - y1
+        len2 = dx * dx + dy * dy
+        t = _clamp(((u - x1) * dx + (v - y1) * dy) / len2, 0.0, 1.0) if len2 > 1e-12 else 0.0
+        px = x1 + t * dx
+        py = y1 + t * dy
+        d2 = (u - px) * (u - px) + (v - py) * (v - py)
+        if d2 < best_d2:
+            best_d2 = d2
+        j = i
+    return math.sqrt(best_d2)
+
+
+def sample_stereo_depth_for_detection(
+    det: DetectionRecord,
+    stereo_depth: StereoDepthFrame,
+    intrinsics: CameraIntrinsics,
+) -> Optional[Tuple[float, float]]:
+    """
+    Sample ZED/stereo depth or disparity inside the foreground cone silhouette.
+    Uses a 7x7 tapered interior grid and a 35th-percentile trimmed core estimator
+    to reject background asphalt/sky behind the cone's bounding box corners.
+    Returns (depth_m, sigma_depth_m) or None if insufficient valid samples.
+    """
+    import struct as _struct
+
+    if not stereo_depth.data or stereo_depth.width <= 0 or stereo_depth.height <= 0:
+        return None
+    enc = str(stereo_depth.encoding).strip().lower()
+    if enc in ("32fc1", "32fc1_meters"):
+        mode = 1
+    elif enc in ("16uc1", "16uc1_mm", "16uc1_millimeters"):
+        mode = 2
+    elif enc in ("32fc1_disparity", "disparity"):
+        mode = 3
+    else:
+        return None
+
+    w = max(1.0, float(det.xmax - det.xmin))
+    h = max(1.0, float(det.ymax - det.ymin))
+    cx = 0.5 * (float(det.xmin) + float(det.xmax))
+    v0 = max(0.0, float(det.ymin) + 0.25 * h)
+    v1 = min(float(max(1, intrinsics.height) - 1), float(det.ymin) + 0.85 * h)
+    if v1 <= v0:
+        return None
+
+    fx = max(1.0, float(intrinsics.fx))
+    baseline = float(stereo_depth.baseline_m) if stereo_depth.baseline_m > 1e-4 else 0.12
+    disp_sigma = float(stereo_depth.disparity_sigma_px) if stereo_depth.disparity_sigma_px > 1e-4 else 0.5
+    min_d = max(0.1, float(stereo_depth.min_depth_m))
+    max_d = max(min_d + 0.1, float(stereo_depth.max_depth_m))
+    scale_x = float(stereo_depth.width) / float(max(1, intrinsics.width))
+    scale_y = float(stereo_depth.height) / float(max(1, intrinsics.height))
+    depth_scale = float(stereo_depth.depth_scale) if stereo_depth.depth_scale > 0.0 else (0.001 if mode == 2 else 1.0)
+    row_step = max(1, int(stereo_depth.row_step_bytes))
+    buf = stereo_depth.data
+    poly = det.polygon_uv if det.polygon_uv and len(det.polygon_uv) >= 3 else None
+
+    samples: List[float] = []
+    k_grid = 7
+    for gy in range(k_grid):
+        fy_t = (gy + 0.5) / float(k_grid)
+        v_img = v0 + fy_t * (v1 - v0)
+        py = max(0, min(stereo_depth.height - 1, int(round(v_img * scale_y))))
+        t_cone = _clamp((v_img - float(det.ymin)) / h, 0.0, 1.0)
+        half_span = max(1.0, 0.30 * w * (0.20 + 0.80 * t_cone))
+        u_lo = max(0.0, cx - half_span)
+        u_hi = min(float(max(1, intrinsics.width) - 1), cx + half_span)
+
+        for gx in range(k_grid):
+            fx_t = (gx + 0.5) / float(k_grid)
+            u_img = u_lo + fx_t * (u_hi - u_lo)
+            if poly is not None and not _point_in_polygon(poly, u_img, v_img):
+                continue
+            px = max(0, min(stereo_depth.width - 1, int(round(u_img * scale_x))))
+            z_val = float("nan")
+            if mode == 1:
+                off = py * row_step + px * 4
+                if off + 4 <= len(buf):
+                    z_val = _struct.unpack_from("<f", buf, off)[0] * depth_scale
+            elif mode == 2:
+                off = py * row_step + px * 2
+                if off + 2 <= len(buf):
+                    raw_u = _struct.unpack_from("<H", buf, off)[0]
+                    if raw_u > 0:
+                        z_val = float(raw_u) * depth_scale
+            elif mode == 3:
+                off = py * row_step + px * 4
+                if off + 4 <= len(buf):
+                    disp = _struct.unpack_from("<f", buf, off)[0]
+                    if math.isfinite(disp) and disp > 0.25:
+                        z_val = (fx * baseline) / float(disp)
+            if math.isfinite(z_val) and min_d <= z_val <= max_d:
+                samples.append(float(z_val))
+
+    if len(samples) < 3:
+        return None
+    samples.sort()
+    n = len(samples)
+    idx_p20 = int(0.20 * (n - 1))
+    idx_p55 = int(0.55 * (n - 1))
+    core = samples[idx_p20 : idx_p55 + 1]
+    z_est = sum(core) / float(len(core))
+    iqr = max(0.0, samples[idx_p55] - samples[idx_p20])
+    sigma_triang = (z_est * z_est * disp_sigma) / max(1.0, fx * baseline)
+    sigma_total = max(0.05, sigma_triang + 0.02 * z_est + 0.50 * iqr)
+    return float(z_est), float(sigma_total)
+
+
 class EarlyFusionProjector:
     def __init__(
         self,
@@ -248,6 +400,8 @@ class EarlyFusionProjector:
         aero_pitch_rad_per_mps2: float = 0.0,
         aero_tz_m_per_mps2: float = 0.0,
         enable_frustum_hull_sampling: bool = False,
+        enable_triangular_cone_mask: bool = False,
+        cone_mask_apex_width_ratio: float = 0.18,
     ) -> None:
         self.intrinsics = intrinsics
         self.extrinsics = extrinsics
@@ -267,6 +421,8 @@ class EarlyFusionProjector:
         self.aero_pitch_rad_per_mps2 = float(aero_pitch_rad_per_mps2)
         self.aero_tz_m_per_mps2 = float(aero_tz_m_per_mps2)
         self.enable_frustum_hull_sampling = bool(enable_frustum_hull_sampling)
+        self.enable_triangular_cone_mask = bool(enable_triangular_cone_mask)
+        self.cone_mask_apex_width_ratio = float(_clamp(cone_mask_apex_width_ratio, 0.0, 1.0))
 
     def apply_aero_compensation(
         self,
@@ -354,14 +510,22 @@ class EarlyFusionProjector:
             return []
         detections: List[DetectionRecord] = []
         for det in msg.detections:
+            probs = _normalize_probs(det.class_probs)
+            is_big = bool(getattr(det, "is_big_orange", False)) or (
+                probs[3] > 0.35 and probs[3] >= max(probs[0], probs[1], probs[2])
+            )
+            poly_raw = getattr(det, "polygon_uv", None)
+            poly = [(float(p[0]), float(p[1])) for p in poly_raw] if poly_raw else None
             detections.append(
                 DetectionRecord(
                     xmin=float(det.xmin),
                     ymin=float(det.ymin),
                     xmax=float(det.xmax),
                     ymax=float(det.ymax),
-                    class_probs=_normalize_probs(det.class_probs),
+                    class_probs=probs,
                     confidence=float(_clamp(det.confidence, 0.0, 1.0)),
+                    is_big_orange=is_big,
+                    polygon_uv=poly,
                 )
             )
         return detections
@@ -548,6 +712,8 @@ class EarlyFusionProjector:
                 float(self.soft_likelihood_min_value),
                 float(self.soft_likelihood_outside_ratio),
                 1 if self.enable_frustum_hull_sampling else 0,
+                1 if getattr(self, "enable_triangular_cone_mask", False) else 0,
+                float(getattr(self, "cone_mask_apex_width_ratio", 0.18)),
             )
             c_clusters = (ClusterInputC * n_clusters)()
             for i, (c_pos, c_cov) in enumerate(clusters_lidar):
@@ -561,6 +727,10 @@ class EarlyFusionProjector:
             c_dets = (Detection2DC * n_dets)()
             for i, det in enumerate(detections):
                 dp = _normalize_probs(det.class_probs)
+                poly = getattr(det, "polygon_uv", None) or []
+                poly_cnt = min(16, len(poly)) if len(poly) >= 3 else 0
+                pu_arr = (ctypes.c_double * 16)(*[float(poly[k][0]) if k < poly_cnt else 0.0 for k in range(16)])
+                pv_arr = (ctypes.c_double * 16)(*[float(poly[k][1]) if k < poly_cnt else 0.0 for k in range(16)])
                 c_dets[i] = Detection2DC(
                     float(det.xmin),
                     float(det.ymin),
@@ -568,6 +738,10 @@ class EarlyFusionProjector:
                     float(det.ymax),
                     (ctypes.c_double * 4)(dp[0], dp[1], dp[2], dp[3]),
                     float(det.confidence),
+                    int(poly_cnt),
+                    pu_arr,
+                    pv_arr,
+                    1 if getattr(det, "is_big_orange", False) else 0,
                 )
             c_fb = (ctypes.c_double * 4)(fb_norm[0], fb_norm[1], fb_norm[2], fb_norm[3])
             c_out = (ClusterSemanticC * n_clusters)()
@@ -704,13 +878,15 @@ class EarlyFusionProjector:
         enable_ground_plane_depth_fusion: bool = False,
         ground_z_base_m: float = -0.12,
         ground_slope_rad: float = 0.0,
+        stereo_depth: Optional[StereoDepthFrame] = None,
+        enable_stereo_depth_fusion: bool = True,
     ) -> List[FrustumRecoveredCone]:
         """
         Bidirectional Camera -> 3D Frustum recovery for cones missed by LiDAR clustering
         (e.g. long-range 18-35m cones where LiDAR scan lines are sparse).
         Computes ray-aligned anisotropic covariance (tight bearing, wider range),
-        supports FSG 505mm big-orange gate cones, and optionally fuses ground-plane
-        homography intersection with bbox-height depth via inverse-variance weighting.
+        supports FSG 505mm big-orange gate cones, and fuses ZED stereo depth/disparity,
+        ground-plane homography intersection, and bbox-height depth via inverse-variance weighting.
         """
         matched_set = set(matched_detection_indices)
         recovered: List[FrustumRecoveredCone] = []
@@ -719,8 +895,8 @@ class EarlyFusionProjector:
         r = self.extrinsics.rotation
         t = self.extrinsics.translation
         cam_orig_x = -(r[0][0] * float(t[0]) + r[1][0] * float(t[1]) + r[2][0] * float(t[2]))
-        cam_orig_y = -(r[0][1] * float(t[0]) + r[1][1] * float(t[1]) + r[2][1] * float(t[2]))
         cam_orig_z = -(r[0][2] * float(t[0]) + r[1][2] * float(t[1]) + r[2][2] * float(t[2]))
+        tan_slope = math.tan(float(ground_slope_rad))
 
         for idx, det in enumerate(detections):
             if idx in matched_set:
@@ -737,36 +913,57 @@ class EarlyFusionProjector:
                 else float(cone_height_m)
             )
             depth_bbox = float(eff_height_m * fy / max(1e-3, h_px))
-            depth = depth_bbox
-            eff_range_std_fraction = float(range_std_fraction)
+            sigma_bbox = max(0.10, 0.14 * depth_bbox)
 
-            u = 0.5 * (float(det.xmin) + float(det.xmax))
-            v = 0.5 * (float(det.ymin) + float(det.ymax))
+            poly = getattr(det, "polygon_uv", None)
+            if poly and len(poly) >= 3:
+                u = sum(p[0] for p in poly) / float(len(poly))
+                v = sum(p[1] for p in poly) / float(len(poly))
+            else:
+                u = 0.5 * (float(det.xmin) + float(det.xmax))
+                v = 0.5 * (float(det.ymin) + float(det.ymax))
             xd = (u - float(self.intrinsics.cx)) / fx
             yd = (v - float(self.intrinsics.cy)) / fy
             xn, yn = self.intrinsics.undistort_normalized(xd, yd)
+
+            inv_var_sum = 1.0 / (sigma_bbox * sigma_bbox)
+            weighted_depth_sum = depth_bbox * inv_var_sum
 
             if enable_ground_plane_depth_fusion:
                 # Back-project bottom-center pixel (u, ymax) ray and intersect with local ground plane
                 yd_bot = (float(det.ymax) - float(self.intrinsics.cy)) / fy
                 xn_b, yn_b = self.intrinsics.undistort_normalized(xd, yd_bot)
                 dir_x = r[0][0] * xn_b + r[1][0] * yn_b + r[2][0] * 1.0
-                dir_y = r[0][1] * xn_b + r[1][1] * yn_b + r[2][1] * 1.0
                 dir_z = r[0][2] * xn_b + r[1][2] * yn_b + r[2][2] * 1.0
-                denom_g = dir_z - dir_x * math.tan(float(ground_slope_rad))
+                denom_g = dir_z - dir_x * tan_slope
                 if denom_g < -1e-3:
                     s_ground = (
                         float(ground_z_base_m)
-                        + cam_orig_x * math.tan(float(ground_slope_rad))
+                        + cam_orig_x * tan_slope
                         - cam_orig_z
                     ) / denom_g
                     if min_depth_m <= s_ground <= max_depth_m and abs(s_ground - depth_bbox) <= 0.35 * depth_bbox:
-                        # Inverse-variance fusion of bbox-height depth and ground-ray homography depth
-                        var_bbox = (0.14 * depth_bbox) ** 2
-                        var_gnd = (0.09 * s_ground) ** 2
-                        depth = (var_gnd * depth_bbox + var_bbox * s_ground) / (var_bbox + var_gnd)
-                        eff_range_std_fraction = float(range_std_fraction) * 0.78
+                        sigma_gnd = max(0.08, 0.09 * s_ground)
+                        w_gnd = 1.0 / (sigma_gnd * sigma_gnd)
+                        inv_var_sum += w_gnd
+                        weighted_depth_sum += s_ground * w_gnd
 
+            used_stereo = False
+            if enable_stereo_depth_fusion and stereo_depth is not None:
+                stereo_est = sample_stereo_depth_for_detection(det, stereo_depth, self.intrinsics)
+                if stereo_est is not None:
+                    z_stereo, sigma_stereo = stereo_est
+                    prior_depth = weighted_depth_sum / inv_var_sum
+                    if (
+                        min_depth_m <= z_stereo <= max_depth_m
+                        and abs(z_stereo - prior_depth) <= 0.45 * max(1.0, prior_depth)
+                    ):
+                        w_stereo = 1.0 / (sigma_stereo * sigma_stereo)
+                        inv_var_sum += w_stereo
+                        weighted_depth_sum += z_stereo * w_stereo
+                        used_stereo = True
+
+            depth = weighted_depth_sum / inv_var_sum
             if depth < min_depth_m or depth > max_depth_m:
                 continue
 
@@ -800,7 +997,7 @@ class EarlyFusionProjector:
             # Anisotropic ray-aligned covariance: R(psi) diag(var_range, var_bearing) R(psi)^T
             psi = math.atan2(y_l, x_l)
             c_p, s_p = math.cos(psi), math.sin(psi)
-            sigma_r = max(0.20, eff_range_std_fraction * depth)
+            sigma_r = max(0.12, min(float(range_std_fraction) * depth, 1.0 / math.sqrt(inv_var_sum)))
             sigma_b = max(0.05, bearing_std_fraction * depth)
             var_r = sigma_r * sigma_r
             var_b = sigma_b * sigma_b
@@ -828,6 +1025,7 @@ class EarlyFusionProjector:
                     confidence=float(det.confidence),
                     depth_m=float(depth),
                     detection_idx=idx,
+                    used_stereo=used_stereo,
                 )
             )
 
@@ -892,6 +1090,58 @@ class EarlyFusionProjector:
         half_w = 0.5 * width
         half_h = 0.5 * height
 
+        poly = getattr(det, "polygon_uv", None)
+        if poly and len(poly) >= 3:
+            poly_use = poly[:16]
+            inside = _point_in_polygon(poly_use, u, v)
+            if not self.soft_likelihood_enabled:
+                return 1.0 if inside else 0.0
+            n = len(poly_use)
+            p_cu = sum(p[0] for p in poly_use) / float(n)
+            p_cv = sum(p[1] for p in poly_use) / float(n)
+            us = [p[0] for p in poly_use]
+            vs = [p[1] for p in poly_use]
+            pw = max(1.0, max(us) - min(us))
+            ph = max(1.0, max(vs) - min(vs))
+            if not inside:
+                d_edge = _min_dist_to_polygon_edges(poly_use, u, v)
+                max_outside = max(
+                    2.0, max(0.0, self.soft_likelihood_outside_ratio - 1.0) * 0.5 * min(pw, ph)
+                )
+                if d_edge > max_outside:
+                    return 0.0
+            sigma_u = max(1.0, self.soft_likelihood_sigma_scale * pw)
+            sigma_v = max(1.0, self.soft_likelihood_sigma_scale * ph)
+            du = (u - p_cu) / sigma_u
+            dv = (v - p_cv) / sigma_v
+            value = math.exp(-0.5 * (du * du + dv * dv))
+            if not inside:
+                value *= 0.65
+            if value < self.soft_likelihood_min_value:
+                return 0.0
+            return float(_clamp(value, 0.0, 1.0))
+
+        if getattr(self, "enable_triangular_cone_mask", False):
+            apex_ratio = _clamp(getattr(self, "cone_mask_apex_width_ratio", 0.18), 0.0, 1.0)
+            t_vert = _clamp((v - det.ymin) / height, 0.0, 1.0)
+            half_w_t = max(0.5, half_w * (apex_ratio + (1.0 - apex_ratio) * t_vert))
+            if not self.soft_likelihood_enabled:
+                if v < det.ymin or v > det.ymax or abs(u - cx) > half_w_t:
+                    return 0.0
+                return 1.0
+            outside_gate_w = max(1.0, self.soft_likelihood_outside_ratio * half_w_t)
+            outside_gate_h = max(1.0, self.soft_likelihood_outside_ratio * half_h)
+            if abs(u - cx) > outside_gate_w or abs(v - cy) > outside_gate_h:
+                return 0.0
+            sigma_u = max(1.0, self.soft_likelihood_sigma_scale * (2.0 * half_w_t))
+            sigma_v = max(1.0, self.soft_likelihood_sigma_scale * height)
+            du = (u - cx) / sigma_u
+            dv = (v - cy) / sigma_v
+            value = math.exp(-0.5 * (du * du + dv * dv))
+            if value < self.soft_likelihood_min_value:
+                return 0.0
+            return float(_clamp(value, 0.0, 1.0))
+
         if not self.soft_likelihood_enabled:
             if u < det.xmin or u > det.xmax or v < det.ymin or v > det.ymax:
                 return 0.0
@@ -922,6 +1172,7 @@ class CameraSensorProfile:
     projector: EarlyFusionProjector
     use_tf_extrinsics: bool = False
     camera_info_topic: str = ""
+    depth_topic: str = ""
 
 
 class MultiCameraEarlyFusion:
@@ -1076,6 +1327,11 @@ class MultiCameraEarlyFusion:
         min_depth_m: float = 3.0,
         max_depth_m: float = 35.0,
         dedup_radius_m: float = 1.2,
+        enable_ground_plane_depth_fusion: bool = False,
+        ground_z_base_m: float = -0.12,
+        ground_slope_rad: float = 0.0,
+        stereo_depth_by_cam: Optional[Dict[str, StereoDepthFrame]] = None,
+        enable_stereo_depth_fusion: bool = True,
     ) -> Dict[str, List[FrustumRecoveredCone]]:
         """Recover unmatched 2D detections across N cameras while deduplicating across views."""
         occupied: List[Tuple[float, float, float]] = list(existing_positions)
@@ -1085,6 +1341,7 @@ class MultiCameraEarlyFusion:
             if not dets:
                 continue
             matched = matched_indices_by_cam.get(cam_id, [])
+            stereo_frame = stereo_depth_by_cam.get(cam_id) if stereo_depth_by_cam else None
             rec_list = profile.projector.recover_unmatched_detections(
                 detections=dets,
                 matched_detection_indices=matched,
@@ -1096,6 +1353,11 @@ class MultiCameraEarlyFusion:
                 min_depth_m=min_depth_m,
                 max_depth_m=max_depth_m,
                 dedup_radius_m=dedup_radius_m,
+                enable_ground_plane_depth_fusion=enable_ground_plane_depth_fusion,
+                ground_z_base_m=ground_z_base_m,
+                ground_slope_rad=ground_slope_rad,
+                stereo_depth=stereo_frame,
+                enable_stereo_depth_fusion=enable_stereo_depth_fusion,
             )
             if rec_list:
                 recovered_by_cam[cam_id] = rec_list

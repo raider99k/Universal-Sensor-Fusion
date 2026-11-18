@@ -131,6 +131,8 @@ struct ExtrinsicsC {
     double soft_likelihood_min_value;
     double soft_likelihood_outside_ratio;
     int32_t enable_frustum_hull_sampling;
+    int32_t enable_triangular_cone_mask;
+    double cone_mask_apex_width_ratio;
 };
 
 struct ClusterInputC {
@@ -149,6 +151,53 @@ struct Detection2DC {
     double ymax;
     double class_probs[4];
     double confidence;
+    int32_t polygon_count;
+    double polygon_u[16];
+    double polygon_v[16];
+    int32_t is_big_orange;
+};
+
+struct StereoDepthImageC {
+    int32_t width;
+    int32_t height;
+    int32_t encoding;  // 0=none, 1=32FC1_meters, 2=16UC1_millimeters, 3=32FC1_disparity
+    const uint8_t* data;
+    int32_t row_step_bytes;
+    double depth_scale;
+    double baseline_m;
+    double disparity_sigma_px;
+    double min_depth_m;
+    double max_depth_m;
+};
+
+struct FrustumRecoveryConfigC {
+    double cone_height_m;
+    double big_orange_height_m;
+    double min_confidence;
+    double min_bbox_height_px;
+    double min_depth_m;
+    double max_depth_m;
+    double dedup_radius_m;
+    double range_std_fraction;
+    double bearing_std_fraction;
+    int32_t enable_ground_plane_depth_fusion;
+    double ground_z_base_m;
+    double ground_slope_rad;
+    int32_t enable_stereo_depth_fusion;
+    int32_t enable_triangular_cone_mask;
+    double cone_mask_apex_width_ratio;
+};
+
+struct RecoveredConeC {
+    double x;
+    double y;
+    double z;
+    double covariance[9];
+    double class_probs[4];
+    double confidence;
+    double depth_m;
+    int32_t detection_idx;
+    int32_t used_stereo;
 };
 
 struct ClusterSemanticC {
@@ -184,6 +233,49 @@ struct TrackerConfigC {
     double odom_vx_std;
     double odom_vy_std;
     double odom_wz_std;
+    double corridor_prior_weight;
+    int32_t enable_global_map;
+    double global_map_gate_radius_m;
+    double global_map_min_lap_distance_m;
+};
+
+struct CorridorEstimateC {
+    double xm;
+    double y0;
+    double slope;
+    double curvature_kappa;
+    double track_width_m;
+    double confidence;
+    int32_t n_waypoints;
+    double left_x[64];
+    double left_y[64];
+    double right_x[64];
+    double right_y[64];
+    double wp_x[64];
+    double wp_y[64];
+    double wp_heading[64];
+    double wp_kappa[64];
+};
+
+struct OnlineCalibPairC {
+    double cx;
+    double cy;
+    double cz;
+    double det_u;
+    double det_v;
+    double det_w;
+    double det_h;
+};
+
+struct OnlineCalibResultC {
+    int32_t matched_pairs;
+    double initial_rmse_px;
+    double final_rmse_px;
+    double delta_roll_rad;
+    double delta_pitch_rad;
+    double delta_yaw_rad;
+    double refined_r[9];
+    double refined_t[3];
 };
 
 struct Observation2DC {
@@ -309,4 +401,43 @@ FUSION_CPP_EXPORT int32_t cpp_tracker_get_tracks(
     const void* handle,
     fusion_core_cpp::TrackEstimateC* out_tracks,
     int32_t max_tracks
+);
+
+FUSION_CPP_EXPORT int32_t cpp_recover_unmatched_detections(
+    int32_t n_dets,
+    const fusion_core_cpp::Detection2DC* dets,
+    const uint8_t* matched_det_flags,
+    int32_t n_existing,
+    const fusion_core_cpp::ClusterInputC* existing_positions,
+    const fusion_core_cpp::CameraIntrinsicsC* intr,
+    const fusion_core_cpp::ExtrinsicsC* ext,
+    const fusion_core_cpp::FrustumRecoveryConfigC* cfg,
+    const fusion_core_cpp::StereoDepthImageC* stereo_depth,
+    fusion_core_cpp::RecoveredConeC* out_recovered,
+    int32_t max_recovered
+);
+
+FUSION_CPP_EXPORT void* cpp_tracker_snapshot_create(const void* handle);
+
+FUSION_CPP_EXPORT void cpp_tracker_snapshot_restore(void* handle, const void* snapshot);
+
+FUSION_CPP_EXPORT void cpp_tracker_snapshot_destroy(void* snapshot);
+
+FUSION_CPP_EXPORT double cpp_tracker_get_last_stamp(const void* handle);
+
+FUSION_CPP_EXPORT int32_t cpp_tracker_get_corridor(
+    const void* handle,
+    double horizon_m,
+    double step_m,
+    const fusion_core_cpp::EgoMotionC* ego,
+    fusion_core_cpp::CorridorEstimateC* out_corridor
+);
+
+FUSION_CPP_EXPORT int32_t cpp_online_calibrate_extrinsics(
+    int32_t n_pairs,
+    const fusion_core_cpp::OnlineCalibPairC* pairs,
+    const fusion_core_cpp::CameraIntrinsicsC* intr,
+    const fusion_core_cpp::ExtrinsicsC* ext,
+    int32_t min_pairs,
+    fusion_core_cpp::OnlineCalibResultC* out_res
 );

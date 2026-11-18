@@ -23,7 +23,7 @@ try:
     from rclpy.node import Node
     from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
     from rclpy.time import Time
-    from sensor_msgs.msg import CameraInfo
+    from sensor_msgs.msg import CameraInfo, Image
     from std_msgs.msg import ColorRGBA, String
     from tf2_ros import Buffer, TransformException, TransformListener
     from visualization_msgs.msg import Marker, MarkerArray
@@ -178,6 +178,15 @@ except ImportError:
             self.d: List[float] = []
             self.p = [0.0] * 12
 
+    class Image:  # type: ignore
+        def __init__(self) -> None:
+            self.header = _HeaderStub()
+            self.width = 0
+            self.height = 0
+            self.encoding = ""
+            self.step = 0
+            self.data = b""
+
     class DiagnosticArray:  # type: ignore
         def __init__(self) -> None:
             self.header = _HeaderStub()
@@ -257,6 +266,7 @@ from .early_fusion import (
     EarlyFusionProjector,
     LidarToCameraExtrinsics,
     MultiCameraEarlyFusion,
+    StereoDepthFrame,
 )
 
 
@@ -371,6 +381,24 @@ class FusionNode(Node):
                         lambda msg, cid=cam_id: self._on_camera_info(msg, camera_id=cid),
                         sensor_qos,
                     )
+            if (
+                getattr(self, "enable_stereo_depth_fusion", True)
+                and getattr(cam_profile, "depth_topic", "")
+            ):
+                if cam_id == "primary":
+                    self.create_subscription(
+                        Image,
+                        cam_profile.depth_topic,
+                        self._on_depth,
+                        sensor_qos,
+                    )
+                else:
+                    self.create_subscription(
+                        Image,
+                        cam_profile.depth_topic,
+                        lambda msg, cid=cam_id: self._on_depth(msg, camera_id=cid),
+                        sensor_qos,
+                    )
         self.create_subscription(
             LidarConeClusters, self.lidar_topic, self._on_lidar, sensor_qos
         )
@@ -459,6 +487,8 @@ class FusionNode(Node):
             "projection_clusters_no_match": 0,
             "projection_high_residual_clusters": 0,
             "frustum_recovered_observations": 0,
+            "stereo_depth_frames": 0,
+            "stereo_depth_fused_observations": 0,
             "camera_fallback_frames": 0,
             "camera_fallback_observations": 0,
             "camera_fallback_no_camera": 0,
@@ -645,6 +675,20 @@ class FusionNode(Node):
             ("enable_bidirectional_frustum_fusion", True),
             ("enable_hungarian_early_fusion", True),
             ("enable_frustum_hull_sampling", False),
+            ("enable_triangular_cone_mask", True),
+            ("cone_mask_apex_width_ratio", 0.18),
+            ("enable_ground_plane_depth_fusion", True),
+            ("ground_z_base_m", -0.22),
+            ("ground_slope_rad", 0.0),
+            ("enable_stereo_depth_fusion", True),
+            ("depth_topic", ""),
+            ("secondary_depth_topic", ""),
+            ("stereo_depth_scale", 0.0),
+            ("stereo_baseline_m", 0.12),
+            ("stereo_disparity_sigma_px", 0.5),
+            ("stereo_depth_max_age_ms", 150.0),
+            ("stereo_depth_min_m", 0.5),
+            ("stereo_depth_max_m", 45.0),
             ("frustum_min_confidence", 0.55),
             ("frustum_dedup_radius_m", 1.2),
             ("aero_pitch_rad_per_mps2", 0.0),
@@ -981,6 +1025,46 @@ class FusionNode(Node):
         self.enable_frustum_hull_sampling = bool(
             self.get_parameter("enable_frustum_hull_sampling").value
         )
+        self.enable_triangular_cone_mask = bool(
+            self.get_parameter("enable_triangular_cone_mask").value
+        )
+        self.cone_mask_apex_width_ratio = float(
+            self.get_parameter("cone_mask_apex_width_ratio").value
+        )
+        self.enable_ground_plane_depth_fusion = bool(
+            self.get_parameter("enable_ground_plane_depth_fusion").value
+        )
+        self.ground_z_base_m = float(
+            self.get_parameter("ground_z_base_m").value
+        )
+        self.ground_slope_rad = float(
+            self.get_parameter("ground_slope_rad").value
+        )
+        self.enable_stereo_depth_fusion = bool(
+            self.get_parameter("enable_stereo_depth_fusion").value
+        )
+        self.depth_topic = str(self.get_parameter("depth_topic").value).strip()
+        self.secondary_depth_topic = str(
+            self.get_parameter("secondary_depth_topic").value
+        ).strip()
+        self.stereo_depth_scale = float(
+            self.get_parameter("stereo_depth_scale").value
+        )
+        self.stereo_baseline_m = float(
+            self.get_parameter("stereo_baseline_m").value
+        )
+        self.stereo_disparity_sigma_px = float(
+            self.get_parameter("stereo_disparity_sigma_px").value
+        )
+        self.stereo_depth_max_age_ms = float(
+            self.get_parameter("stereo_depth_max_age_ms").value
+        )
+        self.stereo_depth_min_m = float(
+            self.get_parameter("stereo_depth_min_m").value
+        )
+        self.stereo_depth_max_m = float(
+            self.get_parameter("stereo_depth_max_m").value
+        )
         self.frustum_min_confidence = float(
             self.get_parameter("frustum_min_confidence").value
         )
@@ -1070,6 +1154,8 @@ class FusionNode(Node):
             aero_pitch_rad_per_mps2=self.aero_pitch_rad_per_mps2,
             aero_tz_m_per_mps2=self.aero_tz_m_per_mps2,
             enable_frustum_hull_sampling=getattr(self, "enable_frustum_hull_sampling", False),
+            enable_triangular_cone_mask=getattr(self, "enable_triangular_cone_mask", True),
+            cone_mask_apex_width_ratio=getattr(self, "cone_mask_apex_width_ratio", 0.18),
         )
 
     def _make_projector(
@@ -1092,6 +1178,8 @@ class FusionNode(Node):
             aero_pitch_rad_per_mps2=self.aero_pitch_rad_per_mps2,
             aero_tz_m_per_mps2=self.aero_tz_m_per_mps2,
             enable_frustum_hull_sampling=getattr(self, "enable_frustum_hull_sampling", False),
+            enable_triangular_cone_mask=getattr(self, "enable_triangular_cone_mask", True),
+            cone_mask_apex_width_ratio=getattr(self, "cone_mask_apex_width_ratio", 0.18),
         )
 
     def _build_camera_and_lidar_registries(self) -> None:
@@ -1103,6 +1191,7 @@ class FusionNode(Node):
                 projector=self.projector,
                 use_tf_extrinsics=self.use_tf_extrinsics,
                 camera_info_topic=getattr(self, "camera_info_topic", ""),
+                depth_topic=getattr(self, "depth_topic", ""),
             )
         }
         sec_topic = getattr(self, "secondary_camera_topic", "").strip()
@@ -1139,6 +1228,7 @@ class FusionNode(Node):
                 projector=self._make_projector(sec_intr, sec_ext),
                 use_tf_extrinsics=False,
                 camera_info_topic=getattr(self, "secondary_camera_info_topic", ""),
+                depth_topic=getattr(self, "secondary_depth_topic", ""),
             )
 
         cam_json = getattr(self, "camera_profiles_json", "").strip()
@@ -1189,6 +1279,7 @@ class FusionNode(Node):
                         projector=self._make_projector(intr, ext),
                         use_tf_extrinsics=bool(entry.get("use_tf_extrinsics", False)),
                         camera_info_topic=str(entry.get("camera_info_topic", "")).strip(),
+                        depth_topic=str(entry.get("depth_topic", "")).strip(),
                     )
                     if cid == "primary":
                         self.projector = self.camera_profiles[cid].projector
@@ -1197,11 +1288,13 @@ class FusionNode(Node):
 
         self.multi_camera_fusion = MultiCameraEarlyFusion(self.camera_profiles)
         self.camera_buffers: Dict[str, Deque[Tuple[float, CameraConeDetections]]] = {}
+        self.depth_buffers: Dict[str, Deque[Tuple[float, StereoDepthFrame]]] = {}
         for cid in self.camera_profiles:
             if cid == "primary":
                 self.camera_buffers[cid] = self.camera_buffer
             else:
                 self.camera_buffers[cid] = deque(maxlen=self.queue_size_camera)
+            self.depth_buffers[cid] = deque(maxlen=max(4, min(16, self.queue_size_camera)))
 
         self.lidar_profiles: Dict[str, LidarSensorProfile] = {
             "primary": LidarSensorProfile(
@@ -1268,6 +1361,64 @@ class FusionNode(Node):
             else self.camera_buffer
         )
         self._push_sorted(target_buf, (stamp, msg), "camera_overflow")
+
+    def _on_depth(self, msg: Image, camera_id: str = "primary") -> None:
+        if not getattr(self, "enable_stereo_depth_fusion", True):
+            return
+        stamp = self._stamp_to_sec(msg.header.stamp.sec, msg.header.stamp.nanosec)
+        enc = str(getattr(msg, "encoding", "")).strip()
+        enc_lower = enc.lower()
+        if enc_lower not in ("32fc1", "16uc1", "32fc1_disparity", "disparity"):
+            return
+        scale = float(getattr(self, "stereo_depth_scale", 0.0))
+        if scale <= 0.0:
+            scale = 0.001 if enc_lower == "16uc1" else 1.0
+        frame = StereoDepthFrame(
+            stamp=stamp,
+            width=int(getattr(msg, "width", 0)),
+            height=int(getattr(msg, "height", 0)),
+            encoding=enc,
+            data=bytes(getattr(msg, "data", b"")),
+            row_step_bytes=int(getattr(msg, "step", 0)),
+            depth_scale=scale,
+            baseline_m=float(getattr(self, "stereo_baseline_m", 0.12)),
+            disparity_sigma_px=float(getattr(self, "stereo_disparity_sigma_px", 0.5)),
+            min_depth_m=float(getattr(self, "stereo_depth_min_m", 0.5)),
+            max_depth_m=float(getattr(self, "stereo_depth_max_m", 45.0)),
+        )
+        depth_buffers = getattr(self, "depth_buffers", None)
+        if depth_buffers is None:
+            self.depth_buffers = {"primary": deque(maxlen=8)}
+            depth_buffers = self.depth_buffers
+        if camera_id not in depth_buffers:
+            depth_buffers[camera_id] = deque(maxlen=8)
+        buf = depth_buffers[camera_id]
+        data = list(buf)
+        data.append((stamp, frame))
+        data.sort(key=lambda v: v[0])
+        if buf.maxlen and len(data) > buf.maxlen:
+            data = data[-buf.maxlen :]
+        buf.clear()
+        buf.extend(data)
+        if "stereo_depth_frames" in self.counters:
+            self.counters["stereo_depth_frames"] += 1
+
+    def _nearest_depth_for_id(
+        self, reference_stamp: float, camera_id: str = "primary"
+    ) -> Optional[StereoDepthFrame]:
+        if not getattr(self, "enable_stereo_depth_fusion", True):
+            return None
+        depth_buffers = getattr(self, "depth_buffers", None)
+        if not depth_buffers:
+            return None
+        buf = depth_buffers.get(camera_id)
+        if not buf:
+            return None
+        max_age_s = float(getattr(self, "stereo_depth_max_age_ms", 150.0)) * 1e-3
+        best_stamp, best_frame = min(buf, key=lambda pair: abs(pair[0] - reference_stamp))
+        if abs(best_stamp - reference_stamp) > max_age_s:
+            return None
+        return best_frame
 
     def _on_extra_lidar(self, msg: LidarConeClusters, lidar_id: str) -> None:
         profiles = getattr(self, "lidar_profiles", {})
@@ -1962,7 +2113,18 @@ class FusionNode(Node):
             and self.enable_projection_semantics
             and active_cam_present
         ):
+            enable_gnd_depth = bool(getattr(self, "enable_ground_plane_depth_fusion", True))
+            gnd_z = float(getattr(self, "ground_z_base_m", -0.22))
+            gnd_slope = float(getattr(self, "ground_slope_rad", 0.0))
+            enable_stereo = bool(getattr(self, "enable_stereo_depth_fusion", True))
+
             if use_multi_cam and camera_msgs_by_cam is not None:
+                stereo_by_cam: Dict[str, StereoDepthFrame] = {}
+                for cid in detections_by_cam:
+                    c_st = cam_stamps_by_cam.get(cid, lidar_stamp_s)
+                    d_fr = self._nearest_depth_for_id(c_st, camera_id=cid)
+                    if d_fr is not None:
+                        stereo_by_cam[cid] = d_fr
                 recovered_by_cam = multi_cam_fusion.recover_multi_camera_unmatched_detections(
                     detections_by_cam=detections_by_cam,
                     matched_indices_by_cam=multi_cam_fusion.last_matched_indices_by_cam,
@@ -1973,6 +2135,11 @@ class FusionNode(Node):
                     min_depth_m=getattr(self, "camera_fallback_min_depth_m", 2.0),
                     max_depth_m=getattr(self, "camera_fallback_max_depth_m", 35.0),
                     dedup_radius_m=getattr(self, "frustum_dedup_radius_m", 1.2),
+                    enable_ground_plane_depth_fusion=enable_gnd_depth,
+                    ground_z_base_m=gnd_z,
+                    ground_slope_rad=gnd_slope,
+                    stereo_depth_by_cam=stereo_by_cam,
+                    enable_stereo_depth_fusion=enable_stereo,
                 )
                 for cid, rec_list in recovered_by_cam.items():
                     c_stamp_item = cam_stamps_by_cam.get(cid, lidar_stamp_s)
@@ -2000,16 +2167,19 @@ class FusionNode(Node):
                         )
                         obs.class_probs = [float(v) for v in rec.class_probs]
                         obs.quality_score = float(
-                            max(0.1, min(1.0, rec.confidence * img_q * 0.70))
+                            max(0.1, min(1.0, rec.confidence * img_q * (0.82 if rec.used_stereo else 0.70)))
                         )
                         obs.sensor_health = health
-                        obs.source = f"{source}_frustum_recovered"
+                        obs.source = f"{source}_stereo_recovered" if rec.used_stereo else f"{source}_frustum_recovered"
                         observations.append(obs)
                         if "frustum_recovered_observations" in self.counters:
                             self.counters["frustum_recovered_observations"] += 1
+                        if rec.used_stereo and "stereo_depth_fused_observations" in self.counters:
+                            self.counters["stereo_depth_fused_observations"] += 1
                         if getattr(self, "enable_tracks", True):
                             tracker_observations.append(self._to_tracker_observation(obs))
             elif detections and camera_msg is not None:
+                stereo_frame = self._nearest_depth_for_id(cam_stamp_s, camera_id="primary")
                 recovered_cones = self.projector.recover_unmatched_detections(
                     detections=detections,
                     matched_detection_indices=matched_detection_indices,
@@ -2020,6 +2190,11 @@ class FusionNode(Node):
                     min_depth_m=getattr(self, "camera_fallback_min_depth_m", 2.0),
                     max_depth_m=getattr(self, "camera_fallback_max_depth_m", 35.0),
                     dedup_radius_m=getattr(self, "frustum_dedup_radius_m", 1.2),
+                    enable_ground_plane_depth_fusion=enable_gnd_depth,
+                    ground_z_base_m=gnd_z,
+                    ground_slope_rad=gnd_slope,
+                    stereo_depth=stereo_frame,
+                    enable_stereo_depth_fusion=enable_stereo,
                 )
                 img_q = float(getattr(camera_msg, "image_quality", 1.0))
                 for rec in recovered_cones:
@@ -2044,13 +2219,15 @@ class FusionNode(Node):
                     )
                     obs.class_probs = [float(v) for v in rec.class_probs]
                     obs.quality_score = float(
-                        max(0.1, min(1.0, rec.confidence * img_q * 0.70))
+                        max(0.1, min(1.0, rec.confidence * img_q * (0.82 if rec.used_stereo else 0.70)))
                     )
                     obs.sensor_health = health
-                    obs.source = f"{source}_frustum_recovered"
+                    obs.source = f"{source}_stereo_recovered" if rec.used_stereo else f"{source}_frustum_recovered"
                     observations.append(obs)
                     if "frustum_recovered_observations" in self.counters:
                         self.counters["frustum_recovered_observations"] += 1
+                    if rec.used_stereo and "stereo_depth_fused_observations" in self.counters:
+                        self.counters["stereo_depth_fused_observations"] += 1
                     if getattr(self, "enable_tracks", True):
                         tracker_observations.append(self._to_tracker_observation(obs))
 
@@ -2661,6 +2838,84 @@ class FusionNode(Node):
         frame_id = self.target_frame if self.target_frame else camera_msg.header.frame_id
         health = SENSOR_HEALTH_DEGRADED
         self.last_health = max(self.last_health, health)
+        cam_stamp_s = (
+            self._stamp_to_sec(camera_msg.header.stamp.sec, camera_msg.header.stamp.nanosec)
+            if hasattr(camera_msg, "header") and getattr(camera_msg.header, "stamp", None) is not None
+            else stamp_sec
+        )
+        stereo_frame = (
+            self._nearest_depth_for_id(cam_stamp_s, camera_id="primary")
+            if hasattr(self, "_nearest_depth_for_id")
+            else None
+        )
+
+        projector = getattr(self, "projector", None)
+        if projector is not None and hasattr(projector, "recover_unmatched_detections"):
+            det_records = projector.detections_from_msg(camera_msg)
+            recovered = projector.recover_unmatched_detections(
+                detections=det_records,
+                matched_detection_indices=[],
+                existing_positions=[],
+                cone_height_m=float(getattr(self, "camera_fallback_cone_height_m", 0.30)),
+                min_confidence=float(getattr(self, "camera_fallback_min_confidence", 0.25)),
+                min_bbox_height_px=float(getattr(self, "camera_fallback_min_bbox_height_px", 8.0)),
+                min_depth_m=float(getattr(self, "camera_fallback_min_depth_m", 2.0)),
+                max_depth_m=float(getattr(self, "camera_fallback_max_depth_m", 35.0)),
+                dedup_radius_m=0.5,
+                enable_ground_plane_depth_fusion=bool(
+                    getattr(self, "enable_ground_plane_depth_fusion", True)
+                ),
+                ground_z_base_m=float(getattr(self, "ground_z_base_m", -0.22)),
+                ground_slope_rad=float(getattr(self, "ground_slope_rad", 0.0)),
+                stereo_depth=stereo_frame,
+                enable_stereo_depth_fusion=bool(
+                    getattr(self, "enable_stereo_depth_fusion", True)
+                ),
+            )
+            img_q = float(getattr(camera_msg, "image_quality", 1.0))
+            for rec in recovered:
+                obs = ConeObservation()
+                obs.header.stamp = camera_msg.header.stamp
+                obs.header.frame_id = frame_id
+                obs.position = Point(
+                    x=float(rec.position[0]),
+                    y=float(rec.position[1]),
+                    z=float(rec.position[2]),
+                )
+                base_cov = (
+                    list(rec.covariance)
+                    if rec.used_stereo
+                    else [
+                        max(float(rec.covariance[0]), float(self.camera_fallback_cov_xy_m2)),
+                        float(rec.covariance[1]),
+                        0.0,
+                        float(rec.covariance[3]),
+                        max(float(rec.covariance[4]), float(self.camera_fallback_cov_xy_m2)),
+                        0.0,
+                        0.0,
+                        0.0,
+                        max(float(rec.covariance[8]), float(self.camera_fallback_cov_z_m2)),
+                    ]
+                )
+                obs.covariance = self._scaled_covariance(
+                    covariance=base_cov,
+                    health=health,
+                    projection_residual_mean_px=0.0,
+                    camera_lidar_abs_delta_ms=self.last_camera_lidar_abs_delta_ms,
+                    motion_age_ms=self.last_motion_age_ms,
+                    motion_comp_error_m=self.last_motion_comp_error_m,
+                )
+                obs.class_probs = [float(v) for v in rec.class_probs]
+                q_scale = max(float(self.camera_fallback_quality_scale), 0.75 if rec.used_stereo else 0.0)
+                obs.quality_score = float(max(0.0, min(1.0, rec.confidence * img_q * q_scale)))
+                obs.sensor_health = health
+                obs.source = f"{source}_stereo" if rec.used_stereo else source
+                observations.append(obs)
+                if rec.used_stereo and hasattr(self, "counters") and "stereo_depth_fused_observations" in self.counters:
+                    self.counters["stereo_depth_fused_observations"] += 1
+                if getattr(self, "enable_tracks", True):
+                    tracker_observations.append(self._to_tracker_observation(obs))
+            return observations, tracker_observations
 
         for det in camera_msg.detections:
             confidence = float(max(0.0, min(1.0, det.confidence)))

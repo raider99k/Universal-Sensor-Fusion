@@ -58,14 +58,14 @@ def generate_launch_description() -> LaunchDescription:
                     ComposableNode(
                         package="fusion_core_cpp",
                         plugin="fusion_core_cpp::OusterLidarComposableNode",
-                        name="ouster_lidar_cpp_adapter",
+                        name="ouster_lidar_adapter",
                         parameters=[lidar_params],
                         extra_arguments=[{"use_intra_process_comms": True}],
                     ),
                     ComposableNode(
                         package="fusion_core_cpp",
                         plugin="fusion_core_cpp::FusionCoreComposableNode",
-                        name="fusion_core_cpp_node",
+                        name="fusion_node",
                         parameters=[fusion_params],
                         extra_arguments=[{"use_intra_process_comms": True}],
                     ),

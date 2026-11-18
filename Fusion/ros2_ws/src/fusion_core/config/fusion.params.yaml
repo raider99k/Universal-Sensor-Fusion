@@ -43,9 +43,23 @@ fusion_node:
     projection_soft_likelihood_outside_ratio: 1.6
     projection_residual_warn_px: 5.0
     projection_residual_critical_px: 12.0
+    enable_triangular_cone_mask: true
+    cone_mask_apex_width_ratio: 0.18
     enable_bidirectional_frustum_fusion: true
     frustum_min_confidence: 0.55
     frustum_dedup_radius_m: 1.2
+    enable_ground_plane_depth_fusion: true
+    ground_z_base_m: -0.22
+    ground_slope_rad: 0.0
+    enable_stereo_depth_fusion: true
+    depth_topic: ""
+    secondary_depth_topic: ""
+    stereo_depth_scale: 0.0
+    stereo_baseline_m: 0.12
+    stereo_disparity_sigma_px: 0.5
+    stereo_depth_max_age_ms: 150.0
+    stereo_depth_min_m: 0.5
+    stereo_depth_max_m: 45.0
     aero_pitch_rad_per_mps2: 0.0
     aero_tz_m_per_mps2: 0.0
 

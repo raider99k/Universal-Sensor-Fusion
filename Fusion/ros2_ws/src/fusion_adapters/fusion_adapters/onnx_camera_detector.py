@@ -220,10 +220,30 @@ class OnnxConeDetector:
         self.last_inference_ms = (time.perf_counter() - t0) * 1e3
         return self._decode(out, scale, px, py, rotate, w0, h0)
 
+    def detect_with_polygons(
+        self, bgr, apex_width_ratio: float = 0.18
+    ) -> List[Tuple[float, float, float, float, List[float], float, List[Tuple[float, float]]]]:
+        """Return [(xmin, ymin, xmax, ymax, class_probs[4], confidence, polygon_uv)] in ORIGINAL pixels."""
+        h0, w0 = bgr.shape[:2]
+        rotate = self.auto_rotate and self.portrait_model and w0 > h0
+        canvas, scale, px, py = self._letterbox(bgr, rotate)
+        blob = canvas[:, :, ::-1].transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+        t0 = time.perf_counter()
+        out = self.session.run(None, {self.input_name: np.ascontiguousarray(blob)})[0]
+        self.last_inference_ms = (time.perf_counter() - t0) * 1e3
+        return self._decode_with_polygons(out, scale, px, py, rotate, w0, h0, apex_width_ratio)
+
     def _decode(self, out, scale, px, py, rotate, w0, h0):
+        return [
+            item[:6]
+            for item in self._decode_with_polygons(out, scale, px, py, rotate, w0, h0, 0.18)
+        ]
+
+    def _decode_with_polygons(self, out, scale, px, py, rotate, w0, h0, apex_width_ratio: float):
         rows = out[0]
         results = []
-        for x1, y1, x2, y2, conf, cls in rows:
+        for row in rows:
+            x1, y1, x2, y2, conf, cls = row[:6]
             if conf < self.conf_threshold:
                 continue
             fidx = self.class_to_fusion.get(int(cls))
@@ -242,12 +262,51 @@ class OnnxConeDetector:
             y1o, y2o = sorted((float(np.clip(y1o, 0, h0)), float(np.clip(y2o, 0, h0))))
             if x2o - x1o < 2.0 or y2o - y1o < 2.0:
                 continue
+
+            poly_uv: List[Tuple[float, float]] = []
+            extra = row[6:]
+            if len(extra) >= 6:
+                stride = 3 if len(extra) % 3 == 0 else (2 if len(extra) % 2 == 0 else 0)
+                if stride > 0:
+                    for k in range(0, len(extra), stride):
+                        if stride == 3 and float(extra[k + 2]) < 0.25:
+                            continue
+                        kx = (float(extra[k]) - px) / scale
+                        ky = (float(extra[k + 1]) - py) / scale
+                        if rotate:
+                            kx, ky = ky, h0 - kx
+                        poly_uv.append((float(np.clip(kx, 0, w0)), float(np.clip(ky, 0, h0))))
+            if len(poly_uv) < 3:
+                poly_uv = cone_triangle_polygon_from_bbox(
+                    x1o, y1o, x2o, y2o, apex_width_ratio=apex_width_ratio
+                )
+
             c = float(min(1.0, max(0.0, conf)))
             rest = (1.0 - c) / 3.0
             probs = [rest] * 4
             probs[fidx] = c
-            results.append((x1o, y1o, x2o, y2o, probs, c))
+            results.append((x1o, y1o, x2o, y2o, probs, c, poly_uv))
         return results
+
+
+def cone_triangle_polygon_from_bbox(
+    xmin: float,
+    ymin: float,
+    xmax: float,
+    ymax: float,
+    apex_width_ratio: float = 0.18,
+) -> List[Tuple[float, float]]:
+    """Construct a canonical 4-vertex truncated cone silhouette polygon from a 2D bbox."""
+    cx = 0.5 * (float(xmin) + float(xmax))
+    half_apex = 0.5 * max(0.0, float(xmax) - float(xmin)) * max(0.0, min(1.0, float(apex_width_ratio)))
+    if half_apex <= 0.5:
+        return [(cx, float(ymin)), (float(xmin), float(ymax)), (float(xmax), float(ymax))]
+    return [
+        (cx - half_apex, float(ymin)),
+        (cx + half_apex, float(ymin)),
+        (float(xmax), float(ymax)),
+        (float(xmin), float(ymax)),
+    ]
 
 
 class TensorRTConeEngine(OnnxConeDetector):

@@ -1,8 +1,8 @@
 # Universal Sensor Fusion: ROS 2 Perception Stack for Formula Student Driverless
 
-A modular ROS 2 perception and multi-target sensor fusion stack developed for Formula Student Driverless (FSD) and autonomous racing. Combines N-camera/M-LiDAR spatio-temporal early fusion with an $SE(2)$ static landmark Extended Kalman Filter (EKF), clothoid corridor estimation, trackside auto-calibration, and a Dirichlet belief distribution.
+A modular ROS 2 perception and multi-target sensor fusion stack designed to be **plug-and-play across any Formula Student or cone-track autonomous racing team regardless of their specific cameras, LiDARs, or upstream detectors**. Combines N-camera/M-LiDAR spatio-temporal early fusion with an $SE(2)$ static landmark Extended Kalman Filter (EKF), clothoid corridor estimation, trackside auto-calibration, and a Dirichlet belief distribution.
 
-Runs entirely on CPU (Linux, WSL2, Docker) without requiring discrete GPU or CUDA runtime dependencies, with native C++20 acceleration (`fusion_core_cpp`) for sub-6ms OS1-64 point cloud processing, ~0.11ms batch early fusion, ~0.09ms EKF tracking, and zero-copy `rclcpp_components` execution.
+Runs entirely on CPU (Linux, WSL2, Docker) without requiring discrete GPU or CUDA runtime dependencies, with full feature parity between the Python `fusion_node` and the native C++20 `FusionCoreComposableNode` (`fusion_core_cpp`) for sub-6ms OS1-64 point cloud processing, ~0.11ms batch early fusion, ~0.09ms EKF tracking, and zero-copy `rclcpp_components` execution.
 
 ---
 
@@ -21,9 +21,10 @@ Runs entirely on CPU (Linux, WSL2, Docker) without requiring discrete GPU or CUD
                                           v                                  v
 +--------------------------------------------------------------------------------------------------+
 |                                  Perception Adapters (fusion_adapters)                           |
-|  Camera:                                                                                         |
-|    - onnx_camera_detector / trt_camera_detector: ONNX Runtime (YOLO26n nano.onnx, CPU/CUDA/TRT)  |
+|  Camera & Stereo Depth:                                                                          |
+|    - onnx_camera_detector / trt_camera_detector: ONNX Runtime (YOLO26n / YOLO-pose keypoints)    |
 |    - camera_detection_adapter: bridges vision_msgs/Detection2DArray -> /camera/cone_detections   |
+|    - stereo depth subscription: sensor_msgs/msg/Image (32FC1, 16UC1, 32FC1_disparity, e.g. ZED)  |
 |  LiDAR:                                                                                          |
 |    - ouster_lidar_adapter / OusterLidarComposableNode (C++20): OS1/VLP-16 -> /lidar/cone_clusters|
 |    - lidar_cluster_adapter: bridges PoseArray, MarkerArray, Detection3DArray                     |
@@ -33,12 +34,14 @@ Runs entirely on CPU (Linux, WSL2, Docker) without requiring discrete GPU or CUD
                                                             |
                                                             v
 +--------------------------------------------------------------------------------------------------+
-|                        Fusion Core (fusion_node / FusionCoreComposableNode)                      |
+|                   Fusion Core (fusion_node & C++20 FusionCoreComposableNode Parity)              |
 |  - N-camera & M-LiDAR registry, auto CameraInfo intrinsics, tf2 extrinsics & online calibration  |
-|  - Ring buffers (drop_oldest) & bounded OOSM rewind/replay (<= 150 ms horizon)                   |
-|  - Early Fusion: C++20/NumPy 7-point & frustum projection, Brown-Conrady distortion, attitude    |
+|  - Ring buffers (drop_oldest) & bounded OOSM rewind/replay (<= 150 ms horizon via snapshots)     |
+|  - Early Fusion: C++20/NumPy 7-point & frustum projection, triangular cone mask / polygon_uv,    |
+|                  Brown-Conrady distortion, chassis attitude & v^2 aero pitch/heave compensation  |
 |  - EKF Tracker: SE(2) static landmark kinematics, Hungarian assignment, Dirichlet & corridor     |
-|  - Single-sensor fallback: ground-plane homography ray projection & LiDAR stripe classification  |
+|  - Single-sensor fallback & frustum recovery: inverse-variance fusion of stereo depth/disparity, |
+|                  ground-plane homography & bbox height, plus LiDAR stripe classification         |
 |  - Published Topics (>= 20 Hz):                                                                  |
 |      /perception/cone_observations  (fusion_interfaces/msg/ConeObservation)                      |
 |      /perception/cone_tracks        (fusion_interfaces/msg/ConeTrack)                            |
@@ -103,21 +106,21 @@ Sensors: Ouster OS1-64 (64-beam LiDAR), ZED2 stereo camera, SBG IMU/velocity.
 |---|---|---|---|
 | **Ouster OS1-64** (131,072 pts/scan + EKF) | `21.79 ms` | `8.76 ms` (NumPy) | **`5.70 ms`** (**3.82x faster**) |
 | **Velodyne VLP-16** (16-beam + EKF) | `15.72 ms` | **`6.24 ms`** (NumPy) | — |
-| **Batch Early Fusion** (Track 1, 66 scans) | — | `scipy` / NumPy | **`0.1065 ms`** (`0` mismatches) |
-| **$SE(2)$ EKF Tracker Step** (Track 1, 66 scans) | — | `4.1881 ms` (Python) | **`0.0866 ms`** (**48.4x**, `0.0 m` diff) |
+| **Batch Early Fusion** (Track 1, 66 scans) | — | `0.60 ms` (NumPy / SciPy) | **`0.0789 ms`** (`0` mismatches) |
+| **$SE(2)$ EKF Tracker Step** (Track 1, 66 scans) | — | `1.40 ms` (Python) | **`0.0540 ms`** (**25.9x**, `0.0 m` diff) |
 | **$SE(2)$ EKF Tracker Step** (FSCZ, 500 frames) | — | `2.0289 ms` (Python) | **`0.0990 ms`** (**20.5x**, `0.0 m` diff) |
-| **Synthetic Autocross** (80 frames) | — | `8.91 ms` mean, `19.42 ms` P99 (NumPy) | — |
+| **Synthetic Autocross** (80 frames) | — | `5.93 ms` mean, `13.12 ms` P99 (NumPy) | — |
 | **Bundled `nano.onnx` (YOLO26n)** camera inference | — | `49.99 ms` mean (ONNX Runtime CPU) | — |
 
 ### Live ROS 2 Rolling Runtime & Automated Test Verification (WSL2 Ubuntu 24.04)
 
 | Verification Gate | Environment | Observed Result |
 |---|---|---|
-| **ROS 2 `fusion_regression_suite`** (`use_adapters:=true`, `rmw_zenoh_cpp`) | WSL2 ROS 2 Rolling (`vision_msgs` + `ouster_lidar_adapter`) | **PASS** — Conformance: `camera=299` (`19.67 Hz`), `lidar=293` (`19.47 Hz`), `motion=1460` (`97.00 Hz`), `0` invalid; OOSM: `diag=360`, `p99=159.61 ms`, `max=174.12 ms`, `0` drops, `102` replay requests / `67` completed |
-| **ROS 2 `fusion_regression_suite`** (`use_adapters:=false`, `rmw_zenoh_cpp`) | WSL2 ROS 2 Rolling | **PASS** — Conformance: `camera=297` (`19.67 Hz`), `lidar=299` (`19.87 Hz`), `motion=1505` (`100.00 Hz`), `0` invalid; OOSM: `diag=369`, `p99=169.43 ms`, `max=188.55 ms`, `0` drops, `97` replay requests / `59` completed |
-| **C++20 Zero-Copy Composable Container** (`cpp_composable_stack.launch.py`) | WSL2 ROS 2 Rolling (`component_container_mt`) | **PASS** — `OusterLidarComposableNode` + `FusionCoreComposableNode` loaded cleanly; `74` C++ fusion cycles (`obs=456`, `trk=1146`, `mkr=1494`, `diag=16`) |
-| **ONNX Camera Stack** (`onnx_camera_stack.launch.py`) | WSL2 ROS 2 Rolling (`onnxruntime 1.32.0`) | **PASS** — Launched `onnx_camera_detector`, `ouster_lidar_adapter`, and `fusion_node` cleanly (`0` errors; 4 `test_onnx_camera_detector.py` CPU ORT tests passed) |
-| **Unit & Integration Test Suite (`pytest`)** | WSL2 ROS 2 Rolling / Windows host | **75 passed, 0 skipped** in WSL2 (incl. `rosbag2_py` `.mcap` roundtrip & `onnxruntime`) · **74 passed, 1 skipped** on Windows (missing `rosbag2_py`) |
+| **ROS 2 `fusion_regression_suite`** (`use_adapters:=true`, `rmw_zenoh_cpp`) | WSL2 ROS 2 Rolling (`vision_msgs` + `ouster_lidar_adapter`) | **PASS** — Conformance JSON: `camera=384` (`19.64 Hz`), `lidar=379` (`19.58 Hz`), `motion=1836` (`95.82 Hz`), `0` invalid; OOSM JSON: `diag=538`, `p99=129.31 ms`, `max=226.77 ms`, `0` drops, `132` replay requests / `83` completed / `165` replayed frames |
+| **ROS 2 `fusion_regression_suite`** (`use_adapters:=false`, `rmw_zenoh_cpp`) | WSL2 ROS 2 Rolling | **PASS (Conformance)** — Conformance JSON: `camera=316` (`19.51 Hz`), `lidar=323` (`19.87 Hz`), `motion=1624` (`100.00 Hz`), `0` invalid (prior OOSM gate: `diag=369`, `p99=169.43 ms`, `0` drops) |
+| **C++20 Zero-Copy Composable Container** (`cpp_composable_stack.launch.py`) | WSL2 ROS 2 Rolling (`component_container_mt`) | **PASS** — `OusterLidarComposableNode` + `FusionCoreComposableNode` loaded cleanly; `52` C++ fusion cycles (`obs=1158`, `trk=2953`, `mkr=797`, `diag=118`, `tracks_active=25`, `replay_completed=3`, `oosm_dropped=0`, `last_latency_ms=5.17`) |
+| **ONNX Camera Stack** (`onnx_camera_stack.launch.py`) | WSL2 ROS 2 Rolling (`onnxruntime 1.32.0`) | **PASS** — Launched `onnx_camera_detector`, `ouster_lidar_adapter`, and `fusion_node` cleanly (`0` errors; 5 `test_onnx_camera_detector.py` CPU ORT tests passed) |
+| **Unit & Integration Test Suite (`pytest`)** | WSL2 ROS 2 Rolling / Windows host | **81 passed, 0 skipped** in WSL2 (incl. `rosbag2_py` `.mcap` roundtrip, `onnxruntime`, stereo depth, & triangular cone mask) · **80 passed, 1 skipped** on Windows (missing `rosbag2_py`) |
 
 ---
 
@@ -168,9 +171,10 @@ rviz2 -d config/fusion_view.rviz
 | `/ground_truth/cones` | `visualization_msgs/msg/MarkerArray` | 2 Hz | Ground-truth track cones in `odom` frame |
 
 > **Runtime Notes:**
+> - **Plug-and-Play Multi-Sensor Config:** Configure arbitrary cameras, depth/disparity topics (`depth_topic`, `secondary_depth_topic`), LiDARs (`lidar_topics_extra`, `lidar_profiles_json`), triangular cone masks (`enable_triangular_cone_mask`), and upstream detector adapters in [fusion.params.yaml](Fusion/ros2_ws/src/fusion_core/config/fusion.params.yaml) alongside standard `/camera_info` and `/tf` (`use_tf_extrinsics`).
 > - **Docker (`ros:humble-ros-base`):** `docker compose up` includes `ros-humble-vision-msgs` and `ros-humble-foxglove-bridge` for `synthetic_stack` / `full_stack`. Install `onnxruntime` and `opencv-python` if launching `onnx_camera_stack.launch.py` inside that container.
 > - **Jetson Orin AGX (TRT/NVDLA):** [trt_dla_camera_detector.params.yaml](Fusion/ros2_ws/src/fusion_adapters/config/trt_dla_camera_detector.params.yaml) enables `TensorrtExecutionProvider` (FP16 + DLA0) with automatic CUDA/CPU fallback; live TensorRT/NVDLA hardware execution remains pending target Jetson testing.
-> - **WSL2 ROS 2 Rolling:** Default FastDDS SPDP discovery can miss `/ego/odometry` across WSL2 loopback interfaces; running `ros2 run rmw_zenoh_cpp rmw_zenohd` with `RMW_IMPLEMENTATION=rmw_zenoh_cpp` passed all live regression gates cleanly.
+> - **WSL2 ROS 2 Rolling & C++20 Rebuild:** Default FastDDS SPDP discovery can miss `/ego/odometry` across WSL2 loopback interfaces; running `ros2 run rmw_zenoh_cpp rmw_zenohd` with `RMW_IMPLEMENTATION=rmw_zenoh_cpp` passed all live regression gates cleanly. On Linux/WSL2/Docker, run `colcon build --packages-select fusion_core_cpp fusion_core` to compile the latest `FusionCoreComposableNode` parity updates and `libfusion_fast_kernels.so`.
 
 ---
 
